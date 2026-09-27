@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-flywheel"
+version = "0.1.0"
+description = "Mine an agent's own transcripts for user corrections, then patch its rules behind an eval gate."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+agent-flywheel = "agent_flywheel.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_flywheel"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
