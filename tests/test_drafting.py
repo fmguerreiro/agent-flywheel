@@ -10,9 +10,44 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "files"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_feedback import drafting, evals  # pyright: ignore[reportMissingImports]
+from agent_flywheel import drafting, evals
+from agent_flywheel.host import Flywheel
+from agent_flywheel.sandbox import NullSandbox
+
+
+class StubHost:
+    def __init__(self, evals_root: Path) -> None:
+        self.repo = Path(evals_root).parent.parent
+        self.evals_root = Path(evals_root)
+
+    def stage_home(self, tree: Path, home: Path) -> None:
+        pass
+
+    def describe(self) -> str:
+        return "A test repository."
+
+
+class StubRunner:
+    def classify(self, payload, *, system, timeout=None):
+        raise AssertionError("drafting never classifies")
+
+    def draft_argv(self, prompt_path, *, cwd, tools, timeout, scratch):
+        runtime_home = scratch / "home"
+        runtime_home.mkdir(parents=True, exist_ok=True)
+        return ["/usr/bin/env", "-i", f"HOME={runtime_home}", "/bin/echo", str(prompt_path)]
+
+
+def fly_for(evals_root: Path) -> Flywheel:
+    return Flywheel(
+        host=StubHost(evals_root),
+        runner=StubRunner(),
+        sandbox=NullSandbox(),
+        sources=(),
+        home=Path(evals_root),
+        state=Path(evals_root),
+    )
 
 
 class Cursor:
@@ -131,7 +166,7 @@ class RunAttemptTest(unittest.TestCase):
             patch.object(evals, "record_results", side_effect=record),
         ):
             result = drafting.run_attempt(
-                Connection(), evals_root=Path("/repo/specs/agent-evals"), case_id="case-1"
+                fly_for(Path("/repo/specs/agent-evals")), Connection(), case_id="case-1"
             )
         return SimpleNamespace(
             result=result,
@@ -302,6 +337,7 @@ class CoverageBracketTest(unittest.TestCase):
                 head_sha="generated-case",
                 case_id="case-1",
                 coverage_paths=["roles/example.py"],
+                host=StubHost(Path("/repo/specs/agent-evals")),
             )
 
         self.assertEqual(result[1:], ("oldest", "older"))
@@ -311,8 +347,9 @@ class CoverageBracketTest(unittest.TestCase):
 
 class DrafterSandboxTest(unittest.TestCase):
     def test_runtime_credentials_are_removed_after_subprocess(self):
-        def fake_run(_args, **kwargs):
-            runtime_home = Path(kwargs["env"]["HOME"])
+        def fake_run(args, **_kwargs):
+            home = next(a for a in args if a.startswith("HOME="))
+            runtime_home = Path(home.removeprefix("HOME="))
             self.assertTrue(runtime_home.is_dir())
             return SimpleNamespace(stdout="ok", stderr="", returncode=0)
 
@@ -324,6 +361,7 @@ class DrafterSandboxTest(unittest.TestCase):
             attempt_dir.mkdir()
             worktree.mkdir()
             stdout, returncode = drafting.run_drafter(
+                runner=StubRunner(), sandbox=NullSandbox(),
                 worktree=worktree, attempt_dir=attempt_dir, prompt="prompt", label="verifier"
             )
             self.assertEqual((stdout, returncode), ("ok", 0))
@@ -393,7 +431,7 @@ class WorktreeCleanupTest(unittest.TestCase):
                     patch.object(drafting, "run_drafter", side_effect=run_drafter),
                 ):
                     result = drafting.run_attempt(
-                        Connection(), evals_root=evals_root, case_id="case-1"
+                        fly_for(evals_root), Connection(), case_id="case-1"
                     )
 
                 self.assertEqual(result["status"], "failed")
