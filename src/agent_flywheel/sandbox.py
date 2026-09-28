@@ -26,10 +26,7 @@ class MacSandbox:
 
     def __init__(self) -> None:
         self._bin = shutil.which("sandbox-exec")
-
-    @property
-    def available(self) -> bool:
-        return self._bin is not None
+        self.available = self._bin is not None
 
     def wrap(
         self,
