@@ -445,23 +445,35 @@ def find_coverage_bracket(
     return None
 
 
+def _commit(worktree: Path, args: list[str]) -> None:
+    """Commits, surfacing a hook's own complaint on rejection.
+
+    A host repo may install commit-msg or pre-commit hooks; the flywheel does
+    not bypass them, because they may carry policy it has no standing to
+    override. But a bare CalledProcessError names only the command, which
+    leaves an operator guessing at what is a perfectly ordinary rejection.
+    """
+    proc = _run(["git", "-C", str(worktree), *args])
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = detail[-1] if detail else f"git {args[0]} exited {proc.returncode}"
+        raise RuntimeError(f"git {args[0]} refused: {reason}")
+
+
 def commit_case(worktree: Path, *, case_id: str) -> None:
     """Separates the two calls' diffs: after this, `git status` reports only
     what the fix call wrote."""
     _run(["git", "-C", str(worktree), "add", "-A"], check=True)
-    _run(
-        ["git", "-C", str(worktree), "commit", "-m", f"test: eval case for {case_id}"],
-        check=True,
-    )
+    _commit(worktree, ["commit", "-m", f"test: eval case for {case_id}"])
 
 
 def commit_worktree(worktree: Path, *, case_id: str, rationale: str) -> str:
     # Amends the case commit rather than stacking on it, so `main` still gets
     # one commit carrying both.
     _run(["git", "-C", str(worktree), "add", "-A"], check=True)
-    _run(
-        ["git", "-C", str(worktree), "commit", "--amend", "-m", f"feat: draft a fix for {case_id}\n\n{rationale}".strip()],
-        check=True,
+    _commit(
+        worktree,
+        ["commit", "--amend", "-m", f"feat: draft a fix for {case_id}\n\n{rationale}".strip()],
     )
     return _run(["git", "-C", str(worktree), "rev-parse", "HEAD"], check=True).stdout.strip()
 
