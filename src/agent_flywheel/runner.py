@@ -16,15 +16,18 @@ from collections.abc import Mapping
 from pathlib import Path
 
 MODEL = "claude-bridge/claude-sonnet-5"
+CLASSIFY_TIMEOUT = 300
 _OMP_AUTH_FILES = ("auth-broker.token", "auth-gateway.token", "install-id")
 _ENV_ALLOWLIST = ("PATH", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "TZ", "CLAUDE_CONFIG_DIR")
 
 
 class OmpRunner:
-    def __init__(self, *, model: str = MODEL) -> None:
+    def __init__(self, *, model: str = MODEL, timeout: int = CLASSIFY_TIMEOUT) -> None:
         self.model_id = model
+        self.timeout = timeout
 
-    def classify(self, payload: dict, *, system: str, timeout: int) -> dict:
+    def classify(self, payload: dict, *, system: str, timeout: int | None = None) -> dict:
+        timeout = self.timeout if timeout is None else timeout
         workdir = tempfile.gettempdir()
         command = [
             "omp",

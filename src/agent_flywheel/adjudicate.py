@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 from . import store
 
 PROMPT_VERSION = "v1"
-CLASSIFY_TIMEOUT = 300
 
 _SYSTEM_PROMPT = """Classify agent-feedback signals. Return one JSON object only.
 Allowed actions are merge and unmatched. For merge, case_id must name one
@@ -114,7 +113,7 @@ def _validate(value, case_ids):
 
 def _call(runner, request, *, phase, case_ids):
     decision = runner.classify(
-        {"phase": phase, **request}, system=_SYSTEM_PROMPT, timeout=CLASSIFY_TIMEOUT
+        {"phase": phase, **request}, system=_SYSTEM_PROMPT
     )
     return _validate(decision, case_ids)
 

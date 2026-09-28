@@ -13,6 +13,7 @@ naming where agent configuration lives inside the repo.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,20 +32,29 @@ class TranscriptSource(Protocol):
     def sessions(self) -> list[tuple[str, str]]:
         """Every known transcript, as (path, harness) pairs."""
 
-    def meta(self, path: str | Path) -> dict:
+    def owns(self, path: str | os.PathLike) -> bool:
+        """True if `path` lives in this source's store.
+
+        A caller holding only a path asks each source in turn, which is how a
+        transcript gets parsed by the right reader. Resolve the root when
+        asked rather than at construction, so a source pointed at a temporary
+        home keeps answering correctly.
+        """
+
+    def meta(self, path: str | os.PathLike) -> dict:
         """Session metadata: harness, session_id, cwd, transcript_path,
         trace_id, model, harness_version, started_at. Missing keys are None.
         """
 
-    def corrections(self, path: str | Path) -> list[dict]:
+    def corrections(self, path: str | os.PathLike) -> list[dict]:
         """Candidate corrections: the user turns that push back on the agent,
         each with the assistant text it was answering.
         """
 
-    def skills_used(self, path: str | Path) -> list[str]:
+    def skills_used(self, path: str | os.PathLike) -> list[str]:
         """Skill or command identifiers invoked during the session."""
 
-    def is_subagent(self, path: str | Path) -> bool:
+    def is_subagent(self, path: str | os.PathLike) -> bool:
         """True for a delegated child session. Corrections in a child are
         addressed to its parent's instructions, not to the user's.
         """
