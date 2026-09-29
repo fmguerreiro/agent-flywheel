@@ -2,7 +2,7 @@ import hashlib
 import json
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from . import store
 
@@ -28,14 +28,14 @@ class Policy:
 
 def _iso(value):
     return (
-        value.astimezone(timezone.utc)
+        value.astimezone(UTC)
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z")
     )
 
 
 def _parse_time(value):
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return datetime.fromisoformat(value)
 
 
 def _signal(row):
@@ -118,18 +118,30 @@ def _call(runner, request, *, phase, case_ids):
     return _validate(decision, case_ids)
 
 
-def _eligible(conn, rows, now):
+def _eligible(conn, rows, now, catalog_hash):
     eligible = []
     for row in rows:
-        retry = conn.execute(
+        latest = conn.execute(
             """
-            SELECT retry_after FROM adjudication_decisions
-            WHERE signal_id = ? AND retry_after IS NOT NULL
-            ORDER BY id DESC LIMIT 1
+            SELECT d.outcome, d.retry_after, r.catalog_hash
+            FROM adjudication_decisions AS d
+            JOIN adjudication_runs AS r ON r.id = d.run_id
+            WHERE d.signal_id = ? AND r.mode = 'apply'
+            ORDER BY d.id DESC LIMIT 1
             """,
             (row["id"],),
         ).fetchone()
-        if retry is None or retry["retry_after"] <= _iso(now):
+        if (
+            latest is None
+            or latest["catalog_hash"] != catalog_hash
+            or (
+                (
+                    latest["outcome"] == "changed"
+                    or latest["outcome"].startswith("classifier_error:")
+                )
+                and latest["retry_after"] <= _iso(now)
+            )
+        ):
             eligible.append(row)
     return eligible
 
@@ -165,7 +177,7 @@ def _pending_groups(conn, confidence):
 
 def run(conn, runner, *, policy=None, shadow=False, force=False, now=None):
     policy = policy or Policy()
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     open_rows = store.open_signals(conn)
     oldest_hours = 0.0
     if open_rows:
@@ -184,16 +196,17 @@ def run(conn, runner, *, policy=None, shadow=False, force=False, now=None):
             "applied": 0,
         }
 
-    rows = _eligible(conn, open_rows, now)[: policy.batch_size]
-    if not rows:
-        return {"result": "cooldown", "model_calls": 0, "processed": 0, "applied": 0}
-
     catalog_rows = store.cases(conn)
     catalog = [_case(row) for row in catalog_rows]
     case_ids = {item["id"] for item in catalog}
     catalog_hash = hashlib.sha256(
         json.dumps(catalog, sort_keys=True).encode()
     ).hexdigest()
+    rows = (
+        open_rows if shadow else _eligible(conn, open_rows, now, catalog_hash)
+    )[: policy.batch_size]
+    if not rows:
+        return {"result": "cooldown", "model_calls": 0, "processed": 0, "applied": 0}
     model = getattr(runner, "model_id", "injected")
     trigger = (
         "forced"
