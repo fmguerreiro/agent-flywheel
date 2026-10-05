@@ -6,6 +6,22 @@ agent's instructions, and commits that fix only if the eval suite still holds.
 
 Unattended. No pull request, no approval step.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    transcripts[Session transcripts] --> ingest[Ingest]
+    ingest --> signals[(Signal store)]
+    signals --> adjudicate[Adjudicate]
+    adjudicate --> cases[Eval cases]
+    cases --> draft[Sandboxed draft]
+    draft --> candidate[Candidate rule patch]
+    candidate --> gate[Base/candidate eval gate]
+    gate -->|leased case fails then passes<br/>no regressions| publish[Push to main]
+    gate -->|otherwise| reject[Discard attempt]
+    publish --> signals
+```
+
 ## The loop
 
 1. **Ingest.** Read session transcripts and extract candidate corrections -
