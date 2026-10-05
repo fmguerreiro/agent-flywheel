@@ -1,10 +1,19 @@
 # agent-flywheel
 
-Mines a coding agent's own session transcripts for the corrections its user
-keeps making, turns the recurring ones into eval cases, drafts a fix to the
-agent's instructions, and commits that fix only if the eval suite still holds.
+agent-flywheel reads a coding agent's session transcripts for corrections from
+the user. It turns repeated corrections into eval cases, drafts changes to the
+agent's instructions, and commits a change only when the eval suite still
+passes.
 
-Unattended. No pull request, no approval step.
+It runs unattended. There is no pull request or approval step.
+
+## Features
+
+- Finds repeated user corrections in local coding-agent transcripts.
+- Requires an eval case and negative fixture before a rule patch.
+- Runs every eval on base and candidate revisions.
+- Publishes only when its own case changes from fail to pass and no earlier case regresses.
+- Uses a normal, non-forced push, so a moved `main` rejects the attempt.
 
 ## Architecture
 
@@ -58,56 +67,55 @@ flowchart LR
 
 ## The loop
 
-1. **Ingest.** Read session transcripts and extract candidate corrections -
-   user turns that push back, paired with the assistant text they answered.
-2. **Adjudicate.** A tool-less model merges each open signal into an existing
-   case or proposes a new one. A merge needs two independent passes naming the
-   same case; a new case needs matching signals from three distinct sessions.
-   Ambiguous results stay open for human triage.
-3. **Draft.** For one candidate case, two sandboxed model calls in a leased
-   git worktree:
-   - the first writes the eval case - `case.toml`, a verifier, and a negative
-     fixture with the same trigger but the wrong action - and commits it;
-   - the second writes the fix, and may read the case but cannot modify it.
+1. **Ingest.** Read session transcripts. Extract candidate corrections: user
+   turns that push back and the assistant text they answer.
+2. **Adjudicate.** A model without tools either merges each open signal into an
+   existing case or proposes a new case. A merge needs two independent passes
+   that name the same case. A new case needs matching signals from three
+   distinct sessions. Ambiguous results remain open for human triage.
+3. **Draft.** For each candidate case, two sandboxed model calls run in a
+   leased git worktree:
+   - First, one writes and commits the eval case: `case.toml`, a verifier, and
+     a negative fixture with the same trigger but the wrong action.
+   - Second, one writes the fix. It can read the case but cannot change it.
 
-   The order is the point. Both calls share a worktree and the drafter can
-   read files, so a fix written first would be on disk for the case-writing
-   call to find. Drafting the case first makes the independence causal rather
-   than a promise in a prompt.
-4. **Gate.** Run the whole accumulated suite at the base commit and at the
-   candidate. Publish only if the leased case goes fail -> pass *and* no other
-   case goes pass -> fail. A case already failing at base is known-open, not
-   damage this draft did.
-5. **Publish.** A plain, non-forced `git push <sha>:main`. If `main` moved,
-   git rejects it and the attempt is discarded.
+   This order matters. Both calls share a worktree, and the drafter can read
+   files. If it wrote the fix first, the case-writing call could find it on
+   disk. Writing the case first makes their independence causal, not a prompt
+   promise.
+4. **Gate.** Run the full accumulated suite at the base commit and candidate.
+   Publish only when the leased case changes from fail to pass *and* no other
+   case changes from pass to fail. A case that already fails at base is known
+   open, not damage caused by this draft.
+5. **Publish.** Run a plain, non-forced `git push <sha>:main`. If `main` has
+   moved, git rejects the push and the attempt is discarded.
 
-Why the gate is separate from the drafter at all: when a self-evolving agent
-proposes and accepts its own changes, greedy acceptance is uncontrolled
-adaptive multiple testing - it p-hacks itself. See
-[PACE](https://arxiv.org/abs/2606.08106), which measures 30-42% false commits
-under a naive "keep it if the score went up" rule, and
-[RSEA](https://arxiv.org/abs/2606.28374) on held-out selection.
+The gate is separate from the drafter because an agent that proposes and
+accepts its own changes can greedily accept a better score. That is
+uncontrolled adaptive multiple testing: it p-hacks itself. [PACE](https://arxiv.org/abs/2606.08106)
+measures 30-42% false commits under a naive "keep it if the score went up"
+rule. [RSEA](https://arxiv.org/abs/2606.28374) covers held-out selection.
 
 ## The four seams
 
-A host supplies one implementation of each protocol in `host.py`. These are
-the only places the library knows anything about its environment; the store,
-the adjudication thresholds, the verdict algebra and the publish step do not.
+A host implements each protocol in `host.py`. These are the only places where
+the library knows about its environment. The store, adjudication thresholds,
+verdict algebra, and publish step do not.
 
 | Seam | What it decides | Shipped |
 |---|---|---|
 | `TranscriptSource` | where sessions live and how to parse them | `OmpTranscripts`, `ClaudeTranscripts` |
-| `ModelRunner` | how a model is called | `OmpRunner` |
-| `Sandbox` | how the drafting subprocess is confined | `MacSandbox`, `NullSandbox` |
+| `ModelRunner` | how to call a model | `OmpRunner` |
+| `Sandbox` | how to confine the drafting subprocess | `MacSandbox`, `NullSandbox` |
 | `HostProject` | where agent configuration lives in the repo | `DotfilesHost`, `SimpleHost` |
 
-`Sandbox` covers the drafting subprocess only. It confines writes and leaves
-reads open, because enumerating an agent CLI's lookup paths proved unstable
-across releases. Eval cases confine themselves separately and more strictly.
+`Sandbox` applies only to the drafting subprocess. It confines writes but
+leaves reads open because agent CLI lookup paths changed across releases. Eval
+cases have separate, stricter confinement.
 
 ## Configuration
 
-`$AGENT_FLYWHEEL_HOME/flywheel.toml`, beside the database it configures:
+Set `$AGENT_FLYWHEEL_HOME/flywheel.toml` beside its database:
 
 ```toml
 [host]
@@ -128,36 +136,39 @@ kind = "omp"
 root = "~/.omp/agent/sessions"
 ```
 
-With no file present the dotfiles layout is assumed and said so on stderr.
-`AGENT_FLYWHEEL_HOME` and `AGENT_FLYWHEEL_STATE` override the state
+Without this file, agent-flywheel uses the dotfiles layout and reports that on
+stderr. `AGENT_FLYWHEEL_HOME` and `AGENT_FLYWHEEL_STATE` override state
 directories.
 
 ## When this does not fit you
 
-**Your agent's rules must be statically checkable.** A structural case is
-`python3 check.py .` against a materialised checkout - no agent, no model, no
-network. That is what makes the gate trustworthy and cheap. Cases that need a
-real agent run are refused outright in autonomous mode: in a recent live run,
-3 of 19 cases came back `skipped` for exactly that reason. If your conventions
-cannot be expressed as a file-inspecting assertion, you get the mining and the
-adjudication, but a much weaker acceptor - and the acceptor is the part that
-decides whether self-evolution helps or drifts.
+**Your agent's rules must be statically checkable.** A structural case runs
+`python3 check.py .` against a materialised checkout. It uses no agent, model,
+or network. That makes the gate cheap and trustworthy. Autonomous mode refuses
+cases that need a real agent run. In a recent live run, 3 of 19 cases returned
+`skipped` for that reason. If you cannot express your conventions as a
+file-inspecting assertion, you still get mining and adjudication, but use a
+much weaker acceptor. The acceptor decides whether self-evolution helps or
+drifts.
 
-**Your agent's configuration must be a git repository.** The publish step
-pushes a commit. If your rules live in a hosted dashboard, half of this is
-inert.
+**Your agent's configuration must be a git repository.** Publishing pushes a
+commit. If your rules live in a hosted dashboard, half the system is inert.
 
-**macOS, for now.** The shipped sandbox is `sandbox-exec`. `NullSandbox` is
-honest about confining nothing; a Linux implementation over `bwrap` would be
-a small addition, and nothing above it would change.
+**macOS, for now.** The shipped sandbox uses `sandbox-exec`. `NullSandbox`
+honestly confines nothing. A Linux implementation using `bwrap` would be a
+small addition; nothing above it would change.
 
 ## Prior art
 
-This is a populated field. [TRACE](https://arxiv.org/abs/2606.13174) compiles
-user corrections into runtime checks; Microsoft's
-[closed-loop framework](https://arxiv.org/abs/2607.13091) accumulates
-behavioural rules from accepted review comments;
-[claude-reflect](https://github.com/BayramAnnakov/claude-reflect) captures
-corrections into `CLAUDE.md` with a human approving each one. What is unusual
-here is committing unattended behind a per-rule regression gate - which is
-also the part most coupled to a repository you can run checks against.
+Related work takes different paths from feedback to change.
+
+| Project | Feedback input | Acceptance gate | Publishes to shared Git |
+|---|---|---|---|
+| **agent-flywheel** | Repeated user corrections in coding-agent transcripts | Eval first; its case must fail then pass; no existing case may regress | Yes, pushes to `main` |
+| [TRACE](https://arxiv.org/html/2606.13174#S4) | User correction signals | Rule lifecycle resolver; candidate gate not documented | Not documented |
+| [Microsoft closed-loop framework](https://arxiv.org/html/2607.13091#S2) | Accepted review comments | Engineer chooses whether rule generalizes; pull request for shared changes | No |
+| [claude-reflect](https://github.com/BayramAnnakov/claude-reflect#how-it-works) | Direct user corrections | User must apply, edit, or skip each rule | No |
+| [Darwin Gödel Machine](https://arxiv.org/html/2505.22954#S3) | Benchmark evaluation logs | Automatic archive selection | Not documented |
+| [Huxley-Gödel Machine](https://arxiv.org/html/2510.21614#S2) | Benchmark task results | Automatic tree-search selection | Not documented |
+
+agent-flywheel combines transcript mining with an eval-first patch and an unattended regression gate. It needs a repository where checks can run.
