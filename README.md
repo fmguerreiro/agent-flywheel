@@ -11,7 +11,7 @@ It runs unattended. There is no pull request or approval step.
 
 - Finds repeated user corrections in local coding-agent transcripts.
 - Requires an eval case and negative fixture before a rule patch.
-- Runs every eval on base and candidate revisions.
+- Compares each runnable eval on base and candidate revisions.
 - Publishes only when its own case changes from fail to pass and no earlier case regresses.
 - Uses a normal, non-forced push, so a moved `main` rejects the attempt.
 
@@ -162,13 +162,13 @@ small addition; nothing above it would change.
 
 Related work takes different paths from feedback to change.
 
-| Project | Feedback input | Acceptance gate | Publishes to shared Git |
-|---|---|---|---|
-| **agent-flywheel** | Repeated user corrections in coding-agent transcripts | Eval first; its case must fail then pass; no existing case may regress | Yes, pushes to `main` |
-| [TRACE](https://arxiv.org/html/2606.13174#S4) | User correction signals | Rule lifecycle resolver; candidate gate not documented | Not documented |
-| [Microsoft closed-loop framework](https://arxiv.org/html/2607.13091#S2) | Accepted review comments | Engineer chooses whether rule generalizes; pull request for shared changes | No |
-| [claude-reflect](https://github.com/BayramAnnakov/claude-reflect#how-it-works) | Direct user corrections | User must apply, edit, or skip each rule | No |
-| [Darwin Gödel Machine](https://arxiv.org/html/2505.22954#S3) | Benchmark evaluation logs | Automatic archive selection | Not documented |
-| [Huxley-Gödel Machine](https://arxiv.org/html/2510.21614#S2) | Benchmark task results | Automatic tree-search selection | Not documented |
+| Project | Learns from | Changes | Accepts change | Applies change |
+|---|---|---|---|---|
+| **agent-flywheel** | Repeated user corrections in coding-agent transcripts | Agent rules and eval cases | Eval first; own case must fail then pass; no existing case may regress | Pushes to `main` unattended |
+| [TRACE](https://arxiv.org/html/2606.13174#S4) | User correction signals | Runtime enforcement rules | Rule lifecycle resolver | Compiles enforcement artifacts |
+| [Microsoft closed-loop framework](https://arxiv.org/html/2607.13091#S2) | Accepted review comments | Instruction rules | Engineer decides; pull request for shared changes | Human pull request |
+| [claude-reflect](https://github.com/BayramAnnakov/claude-reflect#how-it-works) | Direct user corrections | `CLAUDE.md` rules | User applies, edits, or skips | User saves rule |
+| [Darwin Gödel Machine](https://arxiv.org/html/2505.22954#S3) | Benchmark evaluation logs | Agent source code | Automatic archive selection | Adds agent to experiment archive |
+| [Huxley-Gödel Machine](https://arxiv.org/html/2510.21614#S2) | Benchmark task results | Agent tree nodes | Automatic tree-search selection | Selects agent after budget |
 
 agent-flywheel combines transcript mining with an eval-first patch and an unattended regression gate. It needs a repository where checks can run.
