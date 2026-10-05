@@ -29,16 +29,16 @@ flowchart TD
     open[Open signals] --> threshold{Five signals<br/>or oldest is 24 hours?}
     threshold -->|no| wait[Wait]
     threshold -->|yes| classify[Classify signal]
-    classify --> merge{Existing case<br/>at confidence 0.6 or higher?}
-    classify --> low[Below confidence] --> pending
-    merge -->|yes| verifyMerge[Verify merge<br/>with reversed case catalog]
-    verifyMerge -->|same case| attach[Attach signal to case]
-    verifyMerge -->|otherwise| pending[Keep signal open]
-    merge -->|unmatched at confidence 0.6 or higher| group[Group by fingerprint]
+    classify --> result{Classification result}
+    result -->|merge, confidence at least 0.6| verifyMerge[Verify merge<br/>with reversed case catalog]
+    result -->|unmatched, confidence at least 0.6| group[Group by fingerprint]
+    result -->|otherwise| pending[Keep signal open]
+    verifyMerge -->|same case, confidence at least 0.6| attach[Attach signal to case]
+    verifyMerge -->|otherwise| pending
     group --> sessions{Three distinct sessions<br/>and one component?}
     sessions -->|no| pending
     sessions -->|yes| verifyGroup[Verify group]
-    verifyGroup -->|agreement| candidate[Create candidate case]
+    verifyGroup -->|same fingerprint and component,<br/>confidence at least 0.6| candidate[Create candidate case]
     verifyGroup -->|otherwise| pending
 ```
 
