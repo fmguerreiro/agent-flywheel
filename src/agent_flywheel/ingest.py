@@ -97,6 +97,12 @@ def skills_used(
     return _owner(sources, transcript_path).skills_used(transcript_path)
 
 
+def corrections(
+    sources: Sequence[TranscriptSource], transcript_path: str | os.PathLike
+) -> list[dict]:
+    return _owner(sources, transcript_path).corrections(transcript_path)
+
+
 def session_files(sources: Sequence[TranscriptSource]) -> list[tuple[str, str]]:
     files: list[tuple[str, str]] = []
     for source in sources:

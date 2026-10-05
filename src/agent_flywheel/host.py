@@ -68,7 +68,7 @@ class ModelRunner(Protocol):
     wants a file-editing agent loose in a worktree.
     """
 
-    def classify(self, payload: dict, *, system: str, timeout: int) -> dict:
+    def classify(self, payload: dict, *, system: str, timeout: int | None = None) -> dict:
         """One JSON object from a tool-less model. Raises on anything else."""
 
     def draft_argv(

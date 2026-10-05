@@ -66,7 +66,7 @@ def cmd_ingest(fly, args) -> int:
         if not args.derive_signals:
             continue
         try:
-            candidates = ingest.correction_candidates(session["transcript_path"])
+            candidates = ingest.corrections(fly.sources, session["transcript_path"])
         except OSError:
             continue
         for candidate in candidates:
@@ -133,6 +133,15 @@ def cmd_adjudicate(fly, args) -> int:
         print(f"agent-flywheel: adjudicator unavailable: {exc}", file=sys.stderr)
         return 2
 
+    runner = fly.runner
+    if args.model is not None or args.timeout is not None:
+        if not isinstance(runner, OmpRunner):
+            print("agent-flywheel: --model and --timeout only apply to the built-in OMP runner", file=sys.stderr)
+            return 2
+        runner = OmpRunner(
+            model=args.model or runner.model_id,
+            timeout=args.timeout or runner.timeout,
+        )
     policy = adjudicate.Policy(
         min_signals=args.min_signals,
         max_age_hours=args.max_age_hours,
@@ -144,7 +153,7 @@ def cmd_adjudicate(fly, args) -> int:
     try:
         result = adjudicate.run(
             store.connect(fly.db_path),
-            OmpRunner(model=args.model, timeout=args.timeout),
+            runner,
             policy=policy,
             shadow=args.shadow,
             force=args.force,
@@ -316,8 +325,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_adjudicate = sub.add_parser("adjudicate", help="classify open signals without prompting")
     p_adjudicate.add_argument("--shadow", action="store_true")
     p_adjudicate.add_argument("--force", action="store_true")
-    p_adjudicate.add_argument("--model", default="claude-bridge/claude-sonnet-5")
-    p_adjudicate.add_argument("--timeout", type=int, default=300)
+    p_adjudicate.add_argument("--model", default=None)
+    p_adjudicate.add_argument("--timeout", type=int, default=None)
     p_adjudicate.add_argument("--min-signals", type=int, default=5)
     p_adjudicate.add_argument("--max-age-hours", type=int, default=24)
     p_adjudicate.add_argument("--batch-size", type=int, default=20)

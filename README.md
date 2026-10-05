@@ -140,6 +140,32 @@ Without this file, agent-flywheel uses the dotfiles layout and reports that on
 stderr. `AGENT_FLYWHEEL_HOME` and `AGENT_FLYWHEEL_STATE` override state
 directories.
 
+
+### External adapters
+
+Use an importable factory for another coding-agent harness:
+
+```toml
+[runner]
+factory = "my_agent.flywheel:make_runner"
+kwargs = { command = "my-agent" }
+
+[[sources]]
+factory = "my_agent.flywheel:make_source"
+kwargs = { root = "~/.my-agent/sessions" }
+```
+
+The runner factory must return `classify()` and `draft_argv()`. The source
+factory must return an object with a non-empty `name`, plus the methods in
+`TranscriptSource`: `sessions()`, `owns()`, `meta()`, `corrections()`,
+`skills_used()`, and `is_subagent()`. Factories run in the
+`agent-flywheel` process, so their Python module must be installed or on
+`PYTHONPATH`.
+
+OMP remains the default runner. OMP and Claude Code remain the only harnesses
+for online dispatch and behavioural evals. Unattended drafting only accepts
+structural evals, so external adapters can use the full autonomous patch gate.
+
 ## When this does not fit you
 
 **Your agent's rules must be statically checkable.** A structural case runs
