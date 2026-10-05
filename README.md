@@ -22,6 +22,40 @@ flowchart LR
     publish --> signals
 ```
 
+### Adjudication
+
+```mermaid
+flowchart TD
+    open[Open signals] --> threshold{Five signals<br/>or oldest is 24 hours?}
+    threshold -->|no| wait[Wait]
+    threshold -->|yes| classify[Classify signal]
+    classify --> merge{Existing case<br/>at confidence 0.6 or higher?}
+    classify --> low[Below confidence] --> pending
+    merge -->|yes| verifyMerge[Verify merge<br/>with reversed case catalog]
+    verifyMerge -->|same case| attach[Attach signal to case]
+    verifyMerge -->|otherwise| pending[Keep signal open]
+    merge -->|unmatched at confidence 0.6 or higher| group[Group by fingerprint]
+    group --> sessions{Three distinct sessions<br/>and one component?}
+    sessions -->|no| pending
+    sessions -->|yes| verifyGroup[Verify group]
+    verifyGroup -->|agreement| candidate[Create candidate case]
+    verifyGroup -->|otherwise| pending
+```
+
+### Draft gate
+
+```mermaid
+flowchart LR
+    candidate[Candidate case] --> writeCase[Write eval case<br/>and negative fixture]
+    writeCase --> fix[Write rule patch]
+    fix --> compare[Run suite on base<br/>and candidate]
+    compare --> own{Leased case<br/>fails then passes?}
+    own -->|no| discard[Discard attempt]
+    own -->|yes| regressions{Any other case<br/>passes then fails?}
+    regressions -->|yes| discard
+    regressions -->|no| push[Push candidate to main]
+```
+
 ## The loop
 
 1. **Ingest.** Read session transcripts and extract candidate corrections -
