@@ -65,6 +65,25 @@ kwargs = {{ name = "omp" }}
 '''
             )
 
+    def test_rejects_duplicate_external_online_harness_names(self):
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            self.build(
+                f'''\
+[host]
+kind = "simple"
+repo = "."
+stage = {{ "rules" = ".rules" }}
+
+[[online_harnesses]]
+factory = "{__name__}:make_harness"
+kwargs = {{ name = "external" }}
+
+[[online_harnesses]]
+factory = "{__name__}:make_harness"
+kwargs = {{ name = "external" }}
+'''
+            )
+
     def test_cli_reports_malformed_online_harness_config(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

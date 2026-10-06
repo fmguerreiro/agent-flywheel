@@ -158,6 +158,7 @@ def _build_online_harnesses(data: dict) -> tuple[OnlineEvaluationHarness, ...]:
     if not isinstance(rows, list):
         raise ValueError("online_harnesses must be an array of tables")
     built = []
+    names = set()
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("each online harness must be a table")
@@ -170,6 +171,9 @@ def _build_online_harnesses(data: dict) -> tuple[OnlineEvaluationHarness, ...]:
             raise ValueError("online harness must have a non-empty name")
         if name in {"omp", "claude", "any"}:
             raise ValueError(f"online harness name {name!r} is reserved")
+        if name in names:
+            raise ValueError(f"duplicate online harness name {name!r}")
+        names.add(name)
         built.append(harness)
     return tuple(built)
 
