@@ -1,3 +1,5 @@
+<p align="center"><img src="icon.webp" alt="agent-flywheel icon" width="160"></p>
+
 # agent-flywheel
 
 agent-flywheel reads a coding agent's session transcripts for corrections from
