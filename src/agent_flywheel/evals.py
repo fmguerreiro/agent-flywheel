@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import ingest, sources
-from .host import HostProject
+from .host import HostProject, OnlineEvaluationHarness
 
 import tomllib
 
@@ -47,6 +47,12 @@ class Case:
     reject_skill: list[str] = field(default_factory=list)
     fixture: str | None = None
     verify: str | None = None
+
+
+def _required_case_field(value: str | None, case: Case, field: str) -> str:
+    if value is None:
+        raise ValueError(f"{case.kind} case {case.id!r} requires {field}")
+    return value
 
 
 @dataclass
@@ -575,6 +581,70 @@ def _harness_failure(proc: subprocess.CompletedProcess) -> Result | None:
     )
 
 
+def _run_external_dispatch(
+    case: Case, tree: Path, home: Path, harness: OnlineEvaluationHarness
+) -> Result:
+    prompt_file = _required_case_field(case.prompt_file, case, "prompt_file")
+    evaluation = harness.run(
+        (case.path / prompt_file).read_text(), cwd=tree, home=home
+    )
+    if not evaluation.succeeded:
+        return Result(False, True, f"infra: {evaluation.detail}", {"infra": True})
+    evidence = list(evaluation.dispatch_evidence)
+    expect_ok = not case.expect_skill or any(
+        skill in evidence for skill in case.expect_skill
+    )
+    reject_ok = not any(skill in evidence for skill in case.reject_skill)
+    return Result(
+        expect_ok and reject_ok,
+        False,
+        f"skills_used={evidence}",
+        {"skills_used": evidence},
+    )
+
+
+def _run_external_behavioral(
+    case: Case, home: Path, harness: OnlineEvaluationHarness
+) -> Result:
+    prompt_file = _required_case_field(case.prompt_file, case, "prompt_file")
+    fixture = _required_case_field(case.fixture, case, "fixture")
+    verify = _required_case_field(case.verify, case, "verify")
+    with tempfile.TemporaryDirectory(prefix="agent-eval-behavioral-") as scratch_dir:
+        scratch = Path(scratch_dir)
+        fixture_src = case.path / fixture
+        if fixture_src.is_dir():
+            shutil.copytree(fixture_src, scratch, dirs_exist_ok=True)
+
+        evaluation = harness.run(
+            (case.path / prompt_file).read_text(), cwd=scratch, home=home
+        )
+        if not evaluation.succeeded:
+            return Result(False, True, f"infra: {evaluation.detail}", {"infra": True})
+
+        try:
+            proc = subprocess.run(
+                ["bash", str(case.path / verify)],
+                cwd=scratch,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=CASE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return Result(False, False, "verify.sh timed out", {})
+        passed = proc.returncode == 0
+        detail = "ok" if passed else (proc.stdout + proc.stderr).strip()[:500]
+        return Result(passed, False, detail, {"returncode": proc.returncode})
+
+
+def _external_harness(
+    name: str, online_harnesses: tuple[OnlineEvaluationHarness, ...]
+) -> OnlineEvaluationHarness | None:
+    if name == "any":
+        return None
+    return next((harness for harness in online_harnesses if harness.name == name), None)
+
+
 def _run_dispatch(case: Case, tree: Path, home: Path, harness_bin: str) -> Result:
     prompt = (case.path / case.prompt_file).read_text()
     env = _isolated_env(harness_bin, home)
@@ -661,6 +731,7 @@ def run_case(
     home: Path,
     online: bool,
     autonomous: bool = False,
+    online_harnesses: tuple[OnlineEvaluationHarness, ...] = (),
 ) -> Result:
     tree, home = Path(tree), Path(home)
     if case.kind == "structural":
@@ -677,6 +748,16 @@ def run_case(
         return Result(
             False, True, f"{case.kind} case skipped (pass --online to run)", {}
         )
+
+    if harness := _external_harness(case.harness, online_harnesses):
+        if case.kind == "dispatch":
+            return _run_external_dispatch(case, tree, home, harness)
+        if case.kind == "behavioral":
+            return _run_external_behavioral(case, home, harness)
+        raise ValueError(f"unknown case kind {case.kind!r}")
+
+    if case.harness not in {"omp", "claude", "any"}:
+        return Result(False, True, f"harness {case.harness!r} is not configured", {})
 
     harness_bin = _resolve_harness(case.harness)
     if harness_bin is None:
@@ -797,6 +878,7 @@ def compare(
     case_id: str | None = None,
     autonomous: bool = False,
     case_source: str | None = None,
+    online_harnesses: tuple[OnlineEvaluationHarness, ...] = (),
 ) -> list[dict]:
     root = Path(root)
     repo = Path(
@@ -826,6 +908,7 @@ def compare(
                 tree=base_tree,
                 home=base_home,
                 online=online,
+                online_harnesses=online_harnesses,
                 autonomous=autonomous,
             )
             candidate_result = run_case(
@@ -833,6 +916,7 @@ def compare(
                 tree=candidate_tree,
                 home=candidate_home,
                 online=online,
+                online_harnesses=online_harnesses,
                 autonomous=autonomous,
             )
             results.append(_verdict(case, base_result, candidate_result))

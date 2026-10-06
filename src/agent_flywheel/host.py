@@ -131,6 +131,19 @@ class HostProject(Protocol):
 
 
 @dataclass(frozen=True)
+class OnlineEvaluation:
+    succeeded: bool
+    detail: str = ""
+    dispatch_evidence: tuple[str, ...] = ()
+
+
+class OnlineEvaluationHarness(Protocol):
+    name: str
+
+    def run(self, prompt: str, *, cwd: Path, home: Path) -> OnlineEvaluation: ...
+
+
+@dataclass(frozen=True)
 class Flywheel:
     """Everything one flywheel instance needs. Built once, passed down."""
 
@@ -140,7 +153,7 @@ class Flywheel:
     sources: tuple[TranscriptSource, ...]
     home: Path
     state: Path
-
+    online_harnesses: tuple[OnlineEvaluationHarness, ...] = ()
     @property
     def db_path(self) -> Path:
         return self.home / "flywheel.sqlite"

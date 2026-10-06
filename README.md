@@ -164,9 +164,31 @@ factory must return an object with a non-empty `name`, plus the methods in
 `agent-flywheel` process, so their Python module must be installed or on
 `PYTHONPATH`.
 
-OMP remains the default runner. OMP and Claude Code remain the only harnesses
-for online dispatch and behavioural evals. Unattended drafting only accepts
-structural evals, so external adapters can use the full autonomous patch gate.
+### Online evaluation harnesses
+
+Add an external online harness with `[[online_harnesses]]`:
+
+```toml
+[[online_harnesses]]
+factory = "my_agent.flywheel:make_online_harness"
+kwargs = { command = "my-agent" }
+```
+
+The factory must return an object with a non-empty `name` and
+`run(prompt: str, *, cwd: Path, home: Path) -> OnlineEvaluation`. `home`
+contains staged base or candidate configuration; `cwd` contains task tree or
+behavioural fixture directory. Its name must not be `omp`, `claude`, or `any`.
+
+`OnlineEvaluation.succeeded` says whether the agent run succeeded.
+`detail` is optional failure text. When `succeeded` is false, the evaluator
+returns its existing skipped infrastructure result. `dispatch_evidence` is an
+optional tuple of strings. Dispatch evals match those strings against
+`expect_skill` and `reject_skill`. Behavioural evals ignore the evidence and
+run their existing verifier.
+
+Built-in OMP and Claude Code harnesses still work. `any` still tries OMP first,
+then Claude Code. Autonomous drafting still accepts structural evals only;
+online evals do not enter its patch gate.
 
 ## When this does not fit you
 

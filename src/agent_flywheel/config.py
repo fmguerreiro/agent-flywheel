@@ -18,7 +18,7 @@ import tomllib
 from pathlib import Path
 from typing import Any, cast
 
-from .host import Flywheel, ModelRunner, TranscriptSource
+from .host import Flywheel, ModelRunner, OnlineEvaluationHarness, TranscriptSource
 from .hosts import DotfilesHost, SimpleHost
 from .runner import OmpRunner
 from .sandbox import MacSandbox, NullSandbox
@@ -88,10 +88,10 @@ def _adapter(row: dict, *, role: str, methods: tuple[str, ...]) -> Any:
     except (ImportError, AttributeError) as exc:
         raise ValueError(f"cannot load {role} factory {factory_path!r}: {exc}") from exc
     if not callable(factory):
-        raise TypeError(f"{role} factory {factory_path!r} is not callable")
+        raise ValueError(f"{role} factory {factory_path!r} is not callable")
     kwargs = row.get("kwargs", {})
     if not isinstance(kwargs, dict):
-        raise TypeError(f"{role} kwargs must be a table")
+        raise ValueError(f"{role} kwargs must be a table")
     try:
         adapter = factory(**kwargs)
     except TypeError as exc:
@@ -151,6 +151,29 @@ def _build_sources(data: dict) -> tuple:
     return tuple(built)
 
 
+def _build_online_harnesses(data: dict) -> tuple[OnlineEvaluationHarness, ...]:
+    rows = data.get("online_harnesses")
+    if rows is None:
+        return ()
+    if not isinstance(rows, list):
+        raise ValueError("online_harnesses must be an array of tables")
+    built = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("each online harness must be a table")
+        harness = cast(
+            OnlineEvaluationHarness,
+            _adapter(row, role="online harness", methods=("run",)),
+        )
+        name = getattr(harness, "name", None)
+        if not isinstance(name, str) or not name:
+            raise ValueError("online harness must have a non-empty name")
+        if name in {"omp", "claude", "any"}:
+            raise ValueError(f"online harness name {name!r} is reserved")
+        built.append(harness)
+    return tuple(built)
+
+
 def build(*, repo: str | None = None, quiet: bool = False) -> Flywheel:
     home = _home()
     data = _load_toml(home)
@@ -166,4 +189,5 @@ def build(*, repo: str | None = None, quiet: bool = False) -> Flywheel:
         sources=_build_sources(data),
         home=home,
         state=_state(),
+        online_harnesses=_build_online_harnesses(data),
     )

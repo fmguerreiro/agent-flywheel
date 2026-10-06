@@ -176,6 +176,7 @@ def cmd_eval(fly, args) -> int:
     results = evals.compare(
         root, host=fly.host, base=args.base, candidate=args.candidate,
         suite=args.suite, online=args.online,
+        online_harnesses=fly.online_harnesses,
     )
 
     # compare() reports each arm as a bool, or None when the case never ran.
