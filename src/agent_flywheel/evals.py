@@ -12,11 +12,13 @@ import os
 import shutil
 import subprocess
 import tempfile
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import ingest, sources
 from .host import HostProject, OnlineEvaluationHarness
+from .runner import MODEL, copy_omp_credentials
 
 import tomllib
 
@@ -350,22 +352,6 @@ def _run_structural(
     return Result(True, False, "ok", metrics)
 
 
-# An isolated HOME needs copied credentials for omp's auth broker and gateway.
-# Copies keep the writable sandbox from reaching live credential files through
-# symlinks.
-_OMP_AUTH_FILES = ("auth-broker.token", "auth-gateway.token", "install-id")
-
-
-def _copy_omp_auth(home: Path) -> None:
-    real_omp = _REAL_HOME / ".omp"
-    omp_dir = home / ".omp"
-    omp_dir.mkdir(parents=True, exist_ok=True)
-    for name in _OMP_AUTH_FILES:
-        src = real_omp / name
-        if src.is_file():
-            shutil.copyfile(src, omp_dir / name)
-
-
 def _claude_auth_env() -> dict[str, str]:
     # claude's OAuth session lives in the macOS keychain keyed to the OS
     # user, not $HOME, but the CLI still reports "Not logged in" under an
@@ -403,9 +389,7 @@ def _claude_auth_env() -> dict[str, str]:
 
 def _harness_auth_env(harness_bin: str, home: Path) -> dict[str, str]:
     if harness_bin == "omp":
-        # omp's own fallback chain can route through claude-bridge, which
-        # spawns a real claude session needing the same oauth token.
-        _copy_omp_auth(home)
+        copy_omp_credentials(home, source_home=_REAL_HOME)
         return _claude_auth_env()
     if harness_bin == "claude":
         return _claude_auth_env()
@@ -796,27 +780,7 @@ def _pinned_omp_config() -> Path | None:
 def _pinned_omp_model() -> str | None:
     if override := os.environ.get("AGENT_FLYWHEEL_EVAL_MODEL"):
         return override
-    config = _pinned_omp_config()
-    if config is None:
-        return None
-    try:
-        lines = config.read_text().splitlines()
-    except OSError:
-        return None
-    in_roles = False
-    for line in lines:
-        if line == "modelRoles:":
-            in_roles = True
-            continue
-        if not in_roles:
-            continue
-        if line and not line[0].isspace():
-            break
-        key, separator, value = line.strip().partition(":")
-        if key == "default" and separator:
-            return value.strip().strip("'\"") or None
-    return None
-
+    return MODEL
 
 def _setup_home(host: HostProject, tree: Path, home: Path) -> None:
     home.mkdir(parents=True, exist_ok=True)

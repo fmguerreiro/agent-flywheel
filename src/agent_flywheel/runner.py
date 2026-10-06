@@ -10,13 +10,15 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
-MODEL = "claude-bridge/claude-sonnet-5"
+MODEL = "openai-codex/gpt-5.6-terra"
 CLASSIFY_TIMEOUT = 300
+_OMP_AGENT_AUTH_FILES = ("agent.db",)
 _OMP_AUTH_FILES = ("auth-broker.token", "auth-gateway.token", "install-id")
 _ENV_ALLOWLIST = ("PATH", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "TZ", "CLAUDE_CONFIG_DIR")
 
@@ -36,7 +38,6 @@ class OmpRunner:
             "json",
             "--no-tools",
             "--no-session",
-            # No --no-extensions: it unregisters the claude-bridge plugin.
             "--no-skills",
             "--no-rules",
             "--cwd",
@@ -79,25 +80,37 @@ class OmpRunner:
             "--cwd", str(cwd),
             "--model", self.model_id,
             "--tools", tools,
-            # --no-extensions would unregister claude-bridge, which is a plugin.
             "--no-skills", "--no-rules",
             "--auto-approve", "--no-session",
             "--max-time", str(timeout),
         ]
 
 
-def prepare_runtime_home(tmp_dir: Path) -> Path:
-    home = tmp_dir / "home"
+def copy_omp_credentials(home: Path, *, source_home: Path | None = None) -> None:
+    real_omp = (source_home or Path.home()) / ".omp"
     omp_dir = home / ".omp"
     agent_dir = omp_dir / "agent"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    real_omp = Path.home() / ".omp"
+    source_db = real_omp / "agent" / "agent.db"
+    if source_db.is_file():
+        target_db = agent_dir / "agent.db"
+        with sqlite3.connect(source_db) as source, sqlite3.connect(target_db) as target:
+            source.backup(target)
+        target_db.chmod(0o600)
     for name in _OMP_AUTH_FILES:
         source = real_omp / name
         if source.is_file():
             target = omp_dir / name
             shutil.copyfile(source, target)
             target.chmod(0o600)
+
+
+def prepare_runtime_home(tmp_dir: Path) -> Path:
+    home = tmp_dir / "home"
+    copy_omp_credentials(home)
+    omp_dir = home / ".omp"
+    agent_dir = omp_dir / "agent"
+    real_omp = Path.home() / ".omp"
     # claude-bridge is a plugin and its OAuth session resolves through the
     # login keychain, which Keychain Services locates under $HOME.
     plugins = real_omp / "plugins"

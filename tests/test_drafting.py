@@ -85,6 +85,13 @@ class DrafterResultTest(unittest.TestCase):
         self.assertIsNone(drafting.parse_drafter_result(output + "trailing prose"))
 
 
+class PublicationTest(unittest.TestCase):
+    def test_reports_git_push_stderr(self):
+        failed_push = SimpleNamespace(returncode=1, stdout="", stderr="remote rejected")
+        with patch.object(drafting, "_run", return_value=failed_push):
+            with self.assertRaisesRegex(RuntimeError, "remote rejected"):
+                drafting.publish_to_main(Path("/repo"), "head")
+
 class RunAttemptTest(unittest.TestCase):
     def run_fixed_attempt(self, publish, *, outcome="patch", extra_rows=()):
         events = []
@@ -450,6 +457,7 @@ class WorktreeCleanupTest(unittest.TestCase):
                     check=True, capture_output=True, text=True,
                 ).stdout.split()
                 self.assertEqual(origin_log, ["base"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -12,8 +13,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_flywheel import adjudicate, cli, config, ingest, store
-from agent_flywheel.runner import OmpRunner
+from agent_flywheel import adjudicate, cli, config, evals, ingest, store
+from agent_flywheel.runner import MODEL, OmpRunner, prepare_runtime_home
 
 
 class ExternalRunner:
@@ -77,6 +78,8 @@ def make_broken_runner():
     return BrokenRunner()
 
 
+
+
 class ConfigAdapterTest(unittest.TestCase):
     def build(self, text: str):
         with tempfile.TemporaryDirectory() as directory:
@@ -104,6 +107,8 @@ kwargs = {{ name = "external" }}
         )
         self.assertEqual(flywheel.runner.label, "external")
         self.assertEqual(flywheel.sources[0].name, "external")
+
+
 
     def test_uses_omp_runner_without_runner_configuration(self):
         self.assertIsInstance(config._build_runner({}), OmpRunner)
@@ -170,3 +175,27 @@ factory = "{__name__}:make_broken_runner"
             ingest.corrections((source,), "opaque-session"),
             [{"correction": "stop"}],
         )
+
+    def test_runtime_home_copies_wal_backed_agent_credential_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source_home = Path(directory) / "source"
+            source_db = source_home / ".omp" / "agent" / "agent.db"
+            source_db.parent.mkdir(parents=True)
+            with sqlite3.connect(source_db) as source:
+                source.execute("PRAGMA journal_mode=WAL")
+                source.execute("CREATE TABLE credentials (token TEXT)")
+                source.execute("INSERT INTO credentials VALUES ('available')")
+                source.commit()
+                self.assertTrue(source_db.with_name("agent.db-wal").is_file())
+                with tempfile.TemporaryDirectory() as runtime:
+                    with patch("agent_flywheel.runner.Path.home", return_value=source_home):
+                        target_home = prepare_runtime_home(Path(runtime))
+                    with sqlite3.connect(target_home / ".omp" / "agent" / "agent.db") as target:
+                        self.assertEqual(
+                            target.execute("SELECT token FROM credentials").fetchone(),
+                            ("available",),
+                        )
+
+    def test_eval_uses_flywheel_model_without_override(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(evals._pinned_omp_model(), MODEL)

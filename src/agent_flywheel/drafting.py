@@ -28,7 +28,7 @@ from . import store
 DEFAULT_STATE = Path(os.environ.get("AGENT_FLYWHEEL_STATE", "~/.local/state/agent-flywheel")).expanduser()
 
 PROMPT_VERSION = "v1"
-MODEL = "claude-bridge/claude-sonnet-5"
+MODEL = "openai-codex/gpt-5.6-terra"
 TOOLS = "read,grep,glob,edit,write"
 MAX_TIME = "600"
 
@@ -484,7 +484,10 @@ def publish_to_main(repo: Path, head_sha: str) -> None:
     fast-forward-only guarantee the design calls for - no hand-rolled ref
     check needed. Never touches the local `main` ref or working tree.
     """
-    _run(["git", "-C", str(repo), "push", "origin", f"{head_sha}:main"], check=True)
+    completed = _run(["git", "-C", str(repo), "push", "origin", f"{head_sha}:main"])
+    if completed.returncode:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "no git output"
+        raise RuntimeError(f"push to main failed: {detail}")
 
 
 def run_attempt(fly, conn, *, case_id: str | None = None) -> dict | None:
