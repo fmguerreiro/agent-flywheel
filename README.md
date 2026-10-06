@@ -1,11 +1,11 @@
-<p align="center"><img src="icon.webp" alt="agent-flywheel icon" width="160"></p>
-
-# agent-flywheel
-
-agent-flywheel reads a coding agent's session transcripts for corrections from
-the user. It turns repeated corrections into eval cases, drafts changes to the
-agent's instructions, and commits a change only when the eval suite still
-passes.
+<div align="center">
+  <a href="https://github.com/fmguerreiro/agent-flywheel">
+    <img src="icon.webp" alt="agent-flywheel" width="96" height="96" />
+  </a>
+  <h1>agent-flywheel</h1>
+  <p><em>Turn repeated coding-agent corrections into eval cases and autonomous rule patches.</em></p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4c1.svg" alt="MIT License" /></a>
+</div>
 
 It runs unattended. There is no pull request or approval step.
 
