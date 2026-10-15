@@ -98,6 +98,68 @@ uncontrolled adaptive multiple testing: it p-hacks itself. [PACE](https://arxiv.
 measures 30-42% false commits under a naive "keep it if the score went up"
 rule. [RSEA](https://arxiv.org/abs/2606.28374) covers held-out selection.
 
+### Analyze one correction for human confirmation
+
+```sh
+agent-flywheel signals --json
+agent-flywheel triage-propose SIGNAL_ID --json
+```
+
+`triage-propose` sends the selected open signal's full stored evidence to the
+configured model runner. It returns exactly one JSON line with `schema_version`
+(`1`), `signal_id`, a stable `fingerprint` (up to 160 characters), `severity`
+(`low`, `medium`, or `high`), and a concise `diagnosis` (up to 2000 characters).
+Evidence is treated as data; the diagnosis must not claim unverified root causes
+or invent target files.
+
+Analysis opens the database read-only and closes it before calling the model.
+Missing or closed signals, signals changed during analysis, model failures, and
+invalid or incomplete responses return a nonzero exit code with an explanation
+on stderr and no proposal on stdout. Analysis does not resolve signals, create
+cases, draft edits, or publish files.
+
+After a human confirms the generated analysis, the dashboard passes those
+generated fields to `triage-promote SIGNAL_ID --fingerprint ... --severity ...
+--diagnosis ...`. Promotion creates a candidate; this interactive path does not
+start drafting or change unattended adjudication thresholds.
+
+### Review saved candidates
+
+```sh
+agent-flywheel candidates --json
+agent-flywheel candidates --json --limit 50
+```
+
+Returns one JSON line with `schema_version: 1` and `candidates`, oldest first
+(creation time, then ID), limited to 20 by default. Each candidate includes its
+ID, component, severity, diagnosis (up to 2000 characters), creation time, and
+latest draft status/error (up to 500 characters), or `null` if never drafted.
+Active cases, transcripts, and fingerprints are excluded. The command opens the
+database read-only; missing or incompatible databases fail without creating or
+migrating files.
+
+In the OMP dashboard, select a candidate with `j`/`k`, then press `d` to review
+the draft confirmation. No case ID entry is needed. A running draft cannot be
+started again. Confirmation authorizes drafting, evaluation, and an automatic
+push to `origin/main` if checks pass, with no second approval.
+
+For a live stage/activity snapshot, pass an existing private directory's file:
+
+```sh
+agent-flywheel draft --case CASE_ID --repo /path/to/repo --progress-file /private/run/progress.json
+```
+
+The optional file is atomically replaced with `{"stage":"…","activity":"…"}`,
+mode `0600`. Stage changes cover checkout, case writing, instruction drafting,
+evaluations, publication, and completion or failure. Activity comes from model
+text, tool names, or stderr; thinking and tool arguments/results are excluded.
+Snapshots strip terminal controls, redact recognizable credentials, and cap stage
+at 100 characters and activity at 240. Poll this file while the command runs;
+stdout and exit behavior stay unchanged. Raw subprocess logs are written as bytes
+arrive under `$AGENT_FLYWHEEL_STATE/drafts/<attempt>/` (default
+`~/.local/state/agent-flywheel/drafts/`); OMP stdout logs contain JSON events,
+while the final assistant text remains the drafter's result.
+
 ## The four seams
 
 A host implements each protocol in `host.py`. These are the only places where
@@ -114,6 +176,12 @@ verdict algebra, and publish step do not.
 `Sandbox` applies only to the drafting subprocess. It confines writes but
 leaves reads open because agent CLI lookup paths changed across releases. Eval
 cases have separate, stricter confinement.
+
+The OMP runner gives each drafting call a private SQLite backup of
+`~/.omp/agent/agent.db`, including committed WAL data, so the isolated home can
+use the configured model's credentials. The copy is owner-readable/writable
+only and removed with the temporary runtime home after the call. Credential
+updates stay in that copy; the source database is never shared for writes.
 
 ## Configuration
 
@@ -141,6 +209,12 @@ root = "~/.omp/agent/sessions"
 Without this file, agent-flywheel uses the dotfiles layout and reports that on
 stderr. `AGENT_FLYWHEEL_HOME` and `AGENT_FLYWHEEL_STATE` override state
 directories.
+
+The built-in `OmpRunner` uses OMP's configured default model for classification
+and drafting; Flywheel does not choose a provider. Set `model = "provider/model"`
+under `[runner]` to override it, or pass `--model` to `adjudicate` or
+`triage-propose` for one run. Audit records for the built-in runner use the
+explicit model when set, otherwise `omp-configured`.
 
 
 ### External adapters

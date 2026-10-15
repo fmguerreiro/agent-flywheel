@@ -6,6 +6,8 @@ which can carry prompt text worth keeping off shared/group-readable paths.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import json
 import os
 import sqlite3
@@ -202,6 +204,54 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 
     os.chmod(db_path, 0o600)
     return conn
+
+
+def connect_readonly(path: Path) -> sqlite3.Connection:
+    uri = f"{path.expanduser().resolve().as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=1, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        if _user_version(conn) != SCHEMA_VERSION:
+            raise RuntimeError(f"database schema is not version {SCHEMA_VERSION}")
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def snapshot(conn) -> dict:
+    latest_eval = conn.execute(
+        """
+        SELECT case_id, result, created_at
+        FROM eval_runs
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    latest_draft = conn.execute(
+        """
+        SELECT case_id, status, created_at, completed_at, retry_count
+        FROM draft_attempts
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    recent_cases = conn.execute(
+        """
+        SELECT id, component, severity, status, created_at
+        FROM cases
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 5
+        """
+    ).fetchall()
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "counts": counts(conn),
+        "latest_eval": None if latest_eval is None else dict(latest_eval),
+        "latest_draft": None if latest_draft is None else dict(latest_draft),
+        "recent_cases": [dict(case) for case in recent_cases],
+    }
 
 
 @contextmanager

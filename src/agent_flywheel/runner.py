@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Mapping
+from contextlib import closing
 from pathlib import Path
 
 MODEL = "openai-codex/gpt-5.6-terra"
@@ -24,9 +25,12 @@ _ENV_ALLOWLIST = ("PATH", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", 
 
 
 class OmpRunner:
-    def __init__(self, *, model: str = MODEL, timeout: int = CLASSIFY_TIMEOUT) -> None:
+    def __init__(self, *, model: str | None = None, timeout: int = CLASSIFY_TIMEOUT) -> None:
         self.model_id = model
         self.timeout = timeout
+
+    def draft_output(self, on_activity=None):
+        return _DraftOutput(on_activity)
 
     def classify(self, payload: dict, *, system: str, timeout: int | None = None) -> dict:
         timeout = self.timeout if timeout is None else timeout
@@ -42,8 +46,7 @@ class OmpRunner:
             "--no-rules",
             "--cwd",
             workdir,
-            "--model",
-            self.model_id,
+            *(["--model", self.model_id] if self.model_id is not None else []),
             "--max-time",
             str(timeout),
             "--system-prompt",
@@ -78,12 +81,80 @@ class OmpRunner:
             f"TMPDIR={scratch}",
             omp_bin, "-p", f"@{prompt_path}",
             "--cwd", str(cwd),
-            "--model", self.model_id,
+            "--mode", "json",
+            *(["--model", self.model_id] if self.model_id is not None else []),
             "--tools", tools,
             "--no-skills", "--no-rules",
             "--auto-approve", "--no-session",
             "--max-time", str(timeout),
         ]
+
+
+class _DraftOutput:
+    """Decode OMP events without mixing tool results or thinking into the answer."""
+
+    def __init__(self, on_activity=None):
+        self.on_activity = on_activity
+        self.pending = ""
+        self.text = ""
+        self.current = ""
+
+    def feed(self, chunk: str) -> None:
+        self.pending += chunk
+        while "\n" in self.pending:
+            line, self.pending = self.pending.split("\n", 1)
+            self._event(line)
+
+    def finish(self) -> str:
+        if self.pending:
+            self._event(self.pending)
+            self.pending = ""
+        return self.current or self.text
+
+    def _activity(self, text: str) -> None:
+        if self.on_activity is not None and text:
+            self.on_activity(text)
+
+    def _event(self, line: str) -> None:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, Mapping):
+            return
+        kind = event.get("type")
+        if kind == "tool_execution_start":
+            name = event.get("toolName")
+            if isinstance(name, str):
+                self._activity(f"Using {name}")
+        elif kind == "message_start":
+            message = event.get("message")
+            if isinstance(message, Mapping) and message.get("role") == "assistant":
+                self.current = ""
+                self.text = ""
+        elif kind == "message_update":
+            update = event.get("assistantMessageEvent")
+            if isinstance(update, Mapping) and update.get("type") == "text_delta":
+                delta = update.get("delta")
+                if isinstance(delta, str):
+                    self.current += delta
+                    self._activity(self.current)
+        elif kind == "message_end":
+            message = event.get("message")
+            if not isinstance(message, Mapping) or message.get("role") != "assistant":
+                return
+            content = message.get("content")
+            if not isinstance(content, list):
+                return
+            text = "".join(
+                block["text"] for block in content
+                if isinstance(block, Mapping) and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+            )
+            self.current = ""
+            self.text = text
+            if text:
+                self._activity(text)
 
 
 def copy_omp_credentials(home: Path, *, source_home: Path | None = None) -> None:
@@ -94,9 +165,14 @@ def copy_omp_credentials(home: Path, *, source_home: Path | None = None) -> None
     source_db = real_omp / "agent" / "agent.db"
     if source_db.is_file():
         target_db = agent_dir / "agent.db"
-        with sqlite3.connect(source_db) as source, sqlite3.connect(target_db) as target:
-            source.backup(target)
+        target_db.touch(mode=0o600)
         target_db.chmod(0o600)
+        # SQLite backup includes committed WAL data without sharing writable credentials.
+        with (
+            closing(sqlite3.connect(f"{source_db.as_uri()}?mode=ro", uri=True)) as source,
+            closing(sqlite3.connect(target_db)) as target,
+        ):
+            source.backup(target)
     for name in _OMP_AUTH_FILES:
         source = real_omp / name
         if source.is_file():
@@ -111,8 +187,7 @@ def prepare_runtime_home(tmp_dir: Path) -> Path:
     omp_dir = home / ".omp"
     agent_dir = omp_dir / "agent"
     real_omp = Path.home() / ".omp"
-    # claude-bridge is a plugin and its OAuth session resolves through the
-    # login keychain, which Keychain Services locates under $HOME.
+    # OAuth plugins need the login keychain located under the real $HOME.
     plugins = real_omp / "plugins"
     if plugins.is_dir():
         (omp_dir / "plugins").symlink_to(plugins)
@@ -131,7 +206,7 @@ def prepare_runtime_home(tmp_dir: Path) -> Path:
 def _without_extensions(config_text: str) -> str:
     # The copied config declares hooks by ~/.omp path, which resolve against
     # the isolated home and fail to load; one of them also publishes ntfy
-    # notifications. Plugin discovery, and so claude-bridge, is unaffected.
+    # notifications. Plugin discovery is unaffected.
     kept, skipping = [], False
     for line in config_text.splitlines():
         if line.startswith("extensions:"):

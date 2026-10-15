@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -9,10 +10,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from contextlib import closing
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from agent_flywheel import drafting, evals
+from agent_flywheel import drafting, evals, runner
 from agent_flywheel.host import Flywheel
 from agent_flywheel.sandbox import NullSandbox
 
@@ -77,6 +79,35 @@ CASE_FILES = {
     "check.py": "raise SystemExit(0)\n",
     "negative/rule.md": "same trigger, wrong action\n",
 }
+
+class RuntimeCredentialsTest(unittest.TestCase):
+    def test_isolated_refresh_preserves_source_credentials_and_reads_live_wal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real_home = root / "real-home"
+            real_agent = real_home / ".omp" / "agent"
+            real_agent.mkdir(parents=True)
+            original = json.dumps({"access": "original-access", "refresh": "original-refresh"})
+            refreshed = json.dumps({"access": "new-access", "refresh": "new-refresh"})
+            with closing(sqlite3.connect(real_agent / "agent.db")) as source:
+                source.execute("PRAGMA journal_mode=WAL")
+                source.execute("PRAGMA wal_autocheckpoint=0")
+                source.execute("CREATE TABLE auth_credentials (provider TEXT PRIMARY KEY, data TEXT)")
+                source.execute("INSERT INTO auth_credentials VALUES (?, ?)", ("test-provider", original))
+                source.commit()
+                with patch("agent_flywheel.runner.Path.home", return_value=real_home):
+                    runtime_home = runner.prepare_runtime_home(root / "scratch")
+                runtime_db = runtime_home / ".omp" / "agent" / "agent.db"
+                with closing(sqlite3.connect(runtime_db)) as isolated:
+                    updated = isolated.execute(
+                        "UPDATE auth_credentials SET data = ? WHERE provider = ? AND data = ?",
+                        (refreshed, "test-provider", original),
+                    )
+                    self.assertEqual(updated.rowcount, 1)
+                    isolated.commit()
+                self.assertEqual(source.execute("SELECT data FROM auth_credentials").fetchone()[0], original)
+                self.assertEqual(runtime_db.stat().st_mode & 0o777, 0o600)
+
 
 class DrafterResultTest(unittest.TestCase):
     def test_parses_only_a_trailing_json_object(self):
@@ -354,15 +385,7 @@ class CoverageBracketTest(unittest.TestCase):
 
 class DrafterSandboxTest(unittest.TestCase):
     def test_runtime_credentials_are_removed_after_subprocess(self):
-        def fake_run(args, **_kwargs):
-            home = next(a for a in args if a.startswith("HOME="))
-            runtime_home = Path(home.removeprefix("HOME="))
-            self.assertTrue(runtime_home.is_dir())
-            return SimpleNamespace(stdout="ok", stderr="", returncode=0)
-
-        with tempfile.TemporaryDirectory() as root, patch.object(
-            drafting.shutil, "which", return_value="/bin/echo"
-        ), patch.object(drafting, "_run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as root:
             attempt_dir = Path(root) / "attempt"
             worktree = Path(root) / "repo"
             attempt_dir.mkdir()
@@ -371,9 +394,154 @@ class DrafterSandboxTest(unittest.TestCase):
                 runner=StubRunner(), sandbox=NullSandbox(),
                 worktree=worktree, attempt_dir=attempt_dir, prompt="prompt", label="verifier"
             )
-            self.assertEqual((stdout, returncode), ("ok", 0))
+            self.assertEqual((stdout, returncode), (f"{attempt_dir / 'prompt-verifier.md'}\n", 0))
             self.assertFalse((attempt_dir / "tmp-verifier").exists())
-            self.assertEqual((attempt_dir / "verifier.stdout.log").read_text(), "ok")
+            self.assertEqual((attempt_dir / "verifier.stdout.log").read_text(), stdout)
+
+
+class DrafterStreamingTest(unittest.TestCase):
+    def run_script(self, root, script, *, progress=None, json_events=True):
+        adapter = SimpleNamespace(
+            draft_argv=lambda *_args, **_kwargs: [sys.executable, "-c", script],
+        )
+        if json_events:
+            adapter.draft_output = runner.OmpRunner().draft_output
+        return drafting.run_drafter(
+            runner=adapter, sandbox=NullSandbox(), worktree=root, attempt_dir=root,
+            prompt="test prompt", label="verifier", progress=progress,
+        )
+
+    def test_large_final_answer_survives_events_chunks_and_unicode(self):
+        result = {"outcome": "case", "rationale": "é🛠" * 50000}
+        answer = json.dumps(result, ensure_ascii=False)
+        events = [
+            {"type": "message_end", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Earlier assistant message"},
+                {"type": "toolCall", "name": "read", "arguments": {"secret": "hidden"}},
+            ]}},
+            {"type": "tool_execution_start", "toolName": "read"},
+            {"type": "message_end", "message": {"role": "toolResult", "content": [
+                {"type": "text", "text": "Do not return tool output"},
+            ]}},
+            {"type": "message_start", "message": {"role": "assistant"}},
+            {"type": "message_update", "assistantMessageEvent": {
+                "type": "thinking_delta", "delta": "Do not expose reasoning",
+            }},
+            {"type": "message_update", "assistantMessageEvent": {
+                "type": "text_delta", "delta": answer[:200],
+            }},
+            {"type": "message_end", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Do not expose reasoning"},
+                {"type": "text", "text": answer[:100]},
+                {"type": "text", "text": answer[100:]},
+            ]}},
+        ]
+        payload = "\n".join(json.dumps(event, ensure_ascii=False) for event in events).encode()
+        split = payload.index("é".encode()) + 1
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "events.jsonl"
+            source.write_bytes(payload)
+            script = (
+                f"import os, pathlib, time\npayload = pathlib.Path({str(source)!r}).read_bytes()\n"
+                f"os.write(1, payload[:{split}])\ntime.sleep(0.02)\n"
+                f"payload = payload[{split}:]\n"
+                "while payload:\n written = os.write(1, payload[:8192])\n payload = payload[written:]\n"
+            )
+            stdout, code = self.run_script(root, script)
+            self.assertEqual(code, 0)
+            self.assertEqual(drafting.parse_drafter_result(stdout), result)
+            self.assertEqual((root / "verifier.stdout.log").read_bytes(), payload)
+            self.assertFalse((root / "tmp-verifier").exists())
+
+    def test_progress_and_logs_visible_while_process_waits(self):
+        event = json.dumps({"type": "tool_execution_start", "toolName": "read"})
+        thinking = json.dumps({"type": "message_update", "assistantMessageEvent": {
+            "type": "thinking_delta", "delta": "private reasoning",
+        }})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gate = root / "release"
+            observed = []
+            progress = drafting.DraftProgress(root / "progress.json")
+            progress.stage("Writing evaluation case")
+            flush = progress.flush
+
+            def observe():
+                flush()
+                if progress.latest_activity == "Using read" and not progress.pending and not observed:
+                    snapshot = json.loads((root / "progress.json").read_text())
+                    self.assertEqual(snapshot["activity"], "Using read")
+                    self.assertNotIn("private reasoning", snapshot["activity"])
+                    self.assertIn(event.encode(), (root / "verifier.stdout.log").read_bytes())
+                    self.assertEqual((root / "progress.json").stat().st_mode & 0o777, 0o600)
+                    observed.append(snapshot)
+                    gate.touch()
+
+            progress.flush = observe
+            script = (
+                "import os, pathlib, time\n"
+                "data = b'warning\\n' * 30000\n"
+                "while data:\n written = os.write(2, data[:8192])\n data = data[written:]\n"
+                f"os.write(1, {(thinking + chr(10) + event + chr(10)).encode()!r})\n"
+                f"gate = pathlib.Path({str(gate)!r})\n"
+                "deadline = time.monotonic() + 5\n"
+                "while not gate.exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
+                "raise SystemExit(0 if gate.exists() else 7)\n"
+            )
+            _, code = self.run_script(root, script, progress=progress)
+            self.assertEqual(code, 0)
+            self.assertEqual(len(observed), 1)
+            self.assertEqual((root / "verifier.stderr.log").stat().st_size, 240000)
+
+    def test_failed_process_retains_logs_and_removes_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            progress = drafting.DraftProgress(root / "progress.json")
+            progress.stage("Drafting instruction change")
+            stdout, code = self.run_script(
+                root,
+                "import os\nos.write(1, b'{\"outcome\":')\n"
+                "os.write(2, b'\\x1b[31mfailed: password=hidden-value\\x1b[0m')\n"
+                "raise SystemExit(9)",
+                progress=progress, json_events=False,
+            )
+            self.assertEqual(code, 9)
+            self.assertIsNone(drafting.parse_drafter_result(stdout))
+            self.assertFalse((root / "tmp-verifier").exists())
+            self.assertEqual((root / "verifier.stdout.log").read_text(), stdout)
+            progress.stage("Failed", progress.latest_activity)
+            snapshot = json.loads((root / "progress.json").read_text())
+            self.assertIn("failed:", snapshot["activity"])
+            self.assertNotIn("hidden-value", snapshot["activity"])
+            self.assertNotIn("\x1b", snapshot["activity"])
+            self.assertEqual(list(root.glob(".draft-progress-*")), [])
+
+    def test_spawn_failure_removes_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            adapter = SimpleNamespace(draft_argv=lambda *_a, **_k: [str(root / "missing")])
+            with self.assertRaises(FileNotFoundError):
+                drafting.run_drafter(
+                    runner=adapter, sandbox=NullSandbox(), worktree=root, attempt_dir=root,
+                    prompt="test", label="verifier",
+                )
+            self.assertFalse((root / "tmp-verifier").exists())
+
+    def test_stage_changes_bypass_activity_throttle_and_stay_bounded(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            drafting.time, "monotonic", return_value=100,
+        ):
+            root = Path(directory)
+            progress = drafting.DraftProgress(root / "progress.json")
+            progress.stage("Writing evaluation case")
+            progress.activity("first")
+            progress.activity("second")
+            progress.stage("Running evaluations", "🛠" * 500)
+            snapshot = json.loads((root / "progress.json").read_text())
+            self.assertEqual(snapshot["stage"], "Running evaluations")
+            self.assertEqual(len(snapshot["activity"]), 240)
+            self.assertLess((root / "progress.json").stat().st_size, 16384)
 
 
 class WorktreeCleanupTest(unittest.TestCase):

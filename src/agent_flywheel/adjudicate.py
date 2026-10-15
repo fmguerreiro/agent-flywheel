@@ -207,7 +207,7 @@ def run(conn, runner, *, policy=None, shadow=False, force=False, now=None):
     )[: policy.batch_size]
     if not rows:
         return {"result": "cooldown", "model_calls": 0, "processed": 0, "applied": 0}
-    model = getattr(runner, "model_id", "injected")
+    model = getattr(runner, "model_id", "injected") or "omp-configured"
     trigger = (
         "forced"
         if force

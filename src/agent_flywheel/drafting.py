@@ -9,12 +9,17 @@ each case's required negative fixture stand between a drafted diff and
 """
 from __future__ import annotations
 
+import codecs
 import fcntl
 import json
 import os
+import re
+import selectors
 import shutil
 import subprocess
+import tempfile
 import textwrap
+import time
 import uuid
 from pathlib import Path
 
@@ -28,10 +33,79 @@ from . import store
 DEFAULT_STATE = Path(os.environ.get("AGENT_FLYWHEEL_STATE", "~/.local/state/agent-flywheel")).expanduser()
 
 PROMPT_VERSION = "v1"
-MODEL = "openai-codex/gpt-5.6-terra"
 TOOLS = "read,grep,glob,edit,write"
 MAX_TIME = "600"
 
+
+
+_TERMINAL_CONTROL = re.compile(
+    r"\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|P.*?\x1b\\|\[[0-?]*[ -/]*[@-~]|[@-_])"
+    r"|[\x00-\x08\x0b-\x1f\x7f-\x9f]", re.DOTALL
+)
+_SECRET = re.compile(
+    r"(?i)(\bbearer\s+|[\"']?(?:api[-_]?key|access[-_]?token|refresh[-_]?token|"
+    r"authorization|password|secret|token)[\"']?\s*[:=]\s*[\"']?)(?:bearer\s+)?[^\s,\"';}]+"
+    r"|\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|"
+    r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)"
+)
+
+
+def _progress_text(text: str, limit: int) -> str:
+    text = _TERMINAL_CONTROL.sub("", text)
+    text = _SECRET.sub(lambda match: (match.group(1) or "") + "[redacted]", text)
+    return " ".join(text.split())[-limit:]
+
+
+class DraftProgress:
+    """Best-effort, private snapshot; reporting never changes draft outcomes."""
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        self.current_stage = ""
+        self.latest_activity = ""
+        self.last_write = 0.0
+        self.pending = False
+
+    def stage(self, stage: str, activity: str = "") -> None:
+        self.current_stage = _progress_text(stage, 100)
+        self.latest_activity = _progress_text(activity, 240)
+        self._write()
+        self.last_write = 0.0
+        self.pending = False
+
+    def activity(self, activity: str) -> None:
+        if self.path is None:
+            return
+        self.latest_activity = _progress_text(activity, 240)
+        self.pending = True
+        self.flush()
+
+    def flush(self) -> None:
+        if self.pending and time.monotonic() - self.last_write >= 0.2:
+            self._write()
+            self.pending = False
+
+    def _write(self) -> None:
+        if self.path is None:
+            return
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.path.parent, prefix=".draft-progress-",
+                delete=False,
+            ) as file:
+                temporary = Path(file.name)
+                json.dump({"stage": self.current_stage, "activity": self.latest_activity}, file)
+            os.replace(temporary, self.path)
+            self.last_write = time.monotonic()
+        except OSError:
+            pass
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def _block(text: str) -> str:
@@ -215,7 +289,8 @@ def build_fix_prompt(conn, case_row, *, host, evals_rel: str) -> str:
 
 
 def run_drafter(
-    *, runner, sandbox, worktree: Path, attempt_dir: Path, prompt: str, label: str
+    *, runner, sandbox, worktree: Path, attempt_dir: Path, prompt: str, label: str,
+    progress: DraftProgress | None = None,
 ) -> tuple[str, int]:
     prompt_path = attempt_dir / f"prompt-{label}.md"
     prompt_path.write_text(prompt)
@@ -233,10 +308,57 @@ def run_drafter(
             writable=[worktree, tmp_dir, tmp_dir / "home"],
             profile_dir=attempt_dir,
         )
-        proc = _run(argv)
-        (attempt_dir / f"{label}.stdout.log").write_text(proc.stdout)
-        (attempt_dir / f"{label}.stderr.log").write_text(proc.stderr)
-        return proc.stdout, proc.returncode
+        output_factory = getattr(runner, "draft_output", None)
+        output = output_factory(progress.activity if progress else None) if output_factory else None
+        chunks = []
+        activity_text = {"stdout": "", "stderr": ""}
+        decoders = {
+            name: codecs.getincrementaldecoder("utf-8")(errors="replace")
+            for name in ("stdout", "stderr")
+        }
+        with (
+            open(attempt_dir / f"{label}.stdout.log", "wb", buffering=0) as stdout_log,
+            open(attempt_dir / f"{label}.stderr.log", "wb", buffering=0) as stderr_log,
+            selectors.DefaultSelector() as selector,
+            subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc,
+        ):
+            def consume(name: str, data: bytes, *, final: bool = False) -> None:
+                text = decoders[name].decode(data, final=final)
+                if not text:
+                    return
+                if name == "stdout":
+                    if output is not None:
+                        output.feed(text)
+                    else:
+                        chunks.append(text)
+                        if progress is not None:
+                            activity_text[name] = (activity_text[name] + text)[-4096:]
+                            progress.activity(activity_text[name])
+                elif progress is not None and text.strip():
+                    activity_text[name] = (activity_text[name] + text)[-4096:]
+                    progress.activity(activity_text[name])
+
+            try:
+                selector.register(proc.stdout, selectors.EVENT_READ, ("stdout", stdout_log))
+                selector.register(proc.stderr, selectors.EVENT_READ, ("stderr", stderr_log))
+                while selector.get_map():
+                    for key, _ in selector.select(timeout=0.2):
+                        name, log = key.data
+                        data = os.read(key.fileobj.fileno(), 65536)
+                        if data:
+                            log.write(data)
+                            consume(name, data)
+                        else:
+                            selector.unregister(key.fileobj)
+                            consume(name, b"", final=True)
+                    if progress is not None:
+                        progress.flush()
+                returncode = proc.wait()
+            except BaseException:
+                proc.kill()
+                proc.wait()
+                raise
+        return output.finish() if output is not None else "".join(chunks), returncode
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -263,12 +385,15 @@ def parse_drafter_result(stdout: str) -> dict | None:
     return None
 
 
-def _drafter_call(*, fly, worktree: Path, attempt_dir: Path, prompt: str, label: str, outcomes: tuple[str, ...]):
+def _drafter_call(
+    *, fly, worktree: Path, attempt_dir: Path, prompt: str, label: str,
+    outcomes: tuple[str, ...], progress: DraftProgress | None = None,
+):
     """Returns (result, "") or (None, error); each call is its own sandboxed
     subprocess, never a shared session."""
     stdout, returncode = run_drafter(
         runner=fly.runner, sandbox=fly.sandbox,
-        worktree=worktree, attempt_dir=attempt_dir, prompt=prompt, label=label
+        worktree=worktree, attempt_dir=attempt_dir, prompt=prompt, label=label, progress=progress,
     )
     if returncode != 0:
         return None, f"{label} subprocess exited {returncode}"
@@ -490,24 +615,44 @@ def publish_to_main(repo: Path, head_sha: str) -> None:
         raise RuntimeError(f"push to main failed: {detail}")
 
 
-def run_attempt(fly, conn, *, case_id: str | None = None) -> dict | None:
-    state_home = DEFAULT_STATE / "drafts"
-    state_home.mkdir(parents=True, exist_ok=True)
-    lock_path = state_home / "drafter.lock"
-    with open(lock_path, "a+", encoding="utf-8") as lock_file:
-        os.chmod(lock_path, 0o600)
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return None
-        store.recover_running_attempts(conn)
-        return _run_attempt_unlocked(fly, conn, case_id=case_id)
+def run_attempt(
+    fly, conn, *, case_id: str | None = None, progress: DraftProgress | None = None,
+) -> dict | None:
+    progress = progress or DraftProgress(None)
+    progress.stage("Preparing isolated checkout")
+    try:
+        state_home = DEFAULT_STATE / "drafts"
+        state_home.mkdir(parents=True, exist_ok=True)
+        lock_path = state_home / "drafter.lock"
+        with open(lock_path, "a+", encoding="utf-8") as lock_file:
+            os.chmod(lock_path, 0o600)
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                progress.stage("Finished", "Another draft is already running")
+                return None
+            store.recover_running_attempts(conn)
+            result = _run_attempt_unlocked(fly, conn, case_id=case_id, progress=progress)
+        if result is None:
+            progress.stage("Finished", "No eligible candidate cases")
+        else:
+            progress.stage(
+                "Failed" if result["status"] == "failed" else "Finished",
+                result.get("error") or f"{result['case_id']}: {result['status']}",
+            )
+        return result
+    except BaseException as exc:
+        progress.stage("Failed", f"{type(exc).__name__}: {exc}")
+        raise
 
 
-def _run_attempt_unlocked(fly, conn, *, case_id: str | None = None) -> dict | None:
+def _run_attempt_unlocked(
+    fly, conn, *, case_id: str | None = None, progress: DraftProgress | None = None,
+) -> dict | None:
     """One full attempt: lease, draft, preflight, prove, publish. Returns a
     summary dict, or None if nothing was eligible to lease.
     """
+    progress = progress or DraftProgress(None)
     evals_root = Path(fly.host.evals_root).resolve()
     repo = _repo_root(evals_root)
     _run(["git", "-C", str(repo), "fetch", "origin", "main"], check=True)
@@ -522,7 +667,7 @@ def _run_attempt_unlocked(fly, conn, *, case_id: str | None = None) -> dict | No
 
     leased = store.lease_candidate(
         conn,
-        model=MODEL,
+        model=getattr(fly.runner, "model_id", "injected") or "omp-configured",
         prompt_version=PROMPT_VERSION,
         base_sha=base_sha,
         branch_name=branch_name,
@@ -554,6 +699,7 @@ def _run_attempt_unlocked(fly, conn, *, case_id: str | None = None) -> dict | No
         # Case first, so the fix it accepts cannot exist in the tree or the
         # prompt that authors it; preflight_fix then refuses to let the fix
         # call rewrite the case it is judged by.
+        progress.stage("Writing evaluation case")
         verifier, error = _drafter_call(
             fly=fly,
             worktree=worktree,
@@ -563,9 +709,11 @@ def _run_attempt_unlocked(fly, conn, *, case_id: str | None = None) -> dict | No
             ),
             label="verifier",
             outcomes=("case", "blocked"),
+            progress=progress,
         )
         if verifier is None:
             return fail(error)
+        progress.stage("Checking evaluation case")
         error = preflight_case(
             worktree=worktree, evals_rel=evals_rel, case_id=case_id, result=verifier
         )
@@ -577,6 +725,7 @@ def _run_attempt_unlocked(fly, conn, *, case_id: str | None = None) -> dict | No
 
         commit_case(worktree, case_id=case_id)
 
+        progress.stage("Drafting instruction change")
         fix, error = _drafter_call(
             fly=fly,
             worktree=worktree,
@@ -584,10 +733,12 @@ def _run_attempt_unlocked(fly, conn, *, case_id: str | None = None) -> dict | No
             prompt=build_fix_prompt(conn, case_row, host=fly.host, evals_rel=evals_rel),
             label="fix",
             outcomes=("patch", "coverage_only", "blocked"),
+            progress=progress,
         )
         if fix is None:
             return fail(error)
         result = merge_results(verifier, fix)
+        progress.stage("Checking instruction change")
         error = preflight_fix(
             worktree=worktree, evals_rel=evals_rel, case_id=case_id, result=result
         )
@@ -600,6 +751,7 @@ def _run_attempt_unlocked(fly, conn, *, case_id: str | None = None) -> dict | No
 
         from . import evals
 
+        progress.stage("Running evaluations")
         verdict_rows = evals.compare(
             evals_root,
             host=fly.host,
@@ -649,6 +801,7 @@ def _run_attempt_unlocked(fly, conn, *, case_id: str | None = None) -> dict | No
         if result["outcome"] == "coverage_only":
             bracket = None
             if verdict == "same-pass":
+                progress.stage("Running evaluations", "Checking historical fail/pass bracket")
                 bracket = find_coverage_bracket(
                     host=fly.host,
                     repo=repo,
@@ -675,6 +828,7 @@ def _run_attempt_unlocked(fly, conn, *, case_id: str | None = None) -> dict | No
                 f"verdict={verdict}", [own_row], base=record_base, candidate=record_candidate
             )
 
+        progress.stage("Publishing")
         publish_to_main(repo, head_sha)
         counts = evals.record_results(
             conn, evals_root, publish_rows, base=record_base, candidate=record_candidate
