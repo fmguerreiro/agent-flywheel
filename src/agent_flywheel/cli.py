@@ -337,7 +337,13 @@ def cmd_triage_promote(fly, args) -> int:
         except sqlite3.IntegrityError:
             print(f"agent-flywheel: fingerprint already has a case: {args.fingerprint}", file=sys.stderr)
             return 2
-        print(f"promoted signal {args.signal_id} to case {case_id}")
+        if args.json:
+            print(json.dumps(
+                {"schema_version": 1, "signal_id": signal["id"], "case_id": case_id},
+                separators=(",", ":"),
+            ))
+        else:
+            print(f"promoted signal {args.signal_id} to case {case_id}")
         return 0
     finally:
         conn.close()
@@ -586,6 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_triage_promote.add_argument("--fingerprint", required=True)
     p_triage_promote.add_argument("--severity", choices=("low", "medium", "high"), required=True)
     p_triage_promote.add_argument("--diagnosis", required=True)
+    p_triage_promote.add_argument("--json", action="store_true", help="return the created case ID as one JSON line")
     p_triage_promote.set_defaults(func=cmd_triage_promote)
 
     p_adjudicate = sub.add_parser("adjudicate", help="classify open signals without prompting")

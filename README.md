@@ -118,10 +118,16 @@ invalid or incomplete responses return a nonzero exit code with an explanation
 on stderr and no proposal on stdout. Analysis does not resolve signals, create
 cases, draft edits, or publish files.
 
-After a human confirms the generated analysis, the dashboard passes those
-generated fields to `triage-promote SIGNAL_ID --fingerprint ... --severity ...
---diagnosis ...`. Promotion creates a candidate; this interactive path does not
-start drafting or change unattended adjudication thresholds.
+After a human reviews the generated analysis, one dashboard confirmation
+authorizes an isolated edit, evaluation, and automatic commit/push to
+`origin/main` only if checks pass. The dashboard passes the generated fields to
+`triage-promote SIGNAL_ID --json --fingerprint ... --severity ... --diagnosis ...`.
+Promotion returns one JSON line with `schema_version: 1`, `signal_id`, and the
+created `case_id`. Without `--json`, it retains its human-readable output.
+The dashboard immediately drafts that exact case, with live progress and no
+second confirmation. Cancellation or analysis failure does not promote or draft;
+promotion failure does not draft. Failed drafts remain saved candidates for an
+explicitly confirmed retry. Unattended adjudication thresholds are unchanged.
 
 ### Review saved candidates
 

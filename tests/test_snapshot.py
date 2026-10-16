@@ -53,6 +53,18 @@ class SnapshotTest(unittest.TestCase):
             code = args.func(fly, args)
         return code, stdout.getvalue(), stderr.getvalue()
 
+    def promotion_command(self, signal_id=1, fingerprint="confirmed-correction"):
+        args = cli.build_parser().parse_args([
+            "triage-promote", str(signal_id), "--json",
+            "--fingerprint", fingerprint, "--severity", "medium",
+            "--diagnosis", "Review the correction evidence before drafting.",
+        ])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = args.func(SimpleNamespace(db_path=self.db_path), args)
+        return code, stdout.getvalue(), stderr.getvalue()
+
     def database_state(self):
         conn = sqlite3.connect(self.db_path)
         try:
@@ -354,6 +366,43 @@ class SnapshotTest(unittest.TestCase):
         code, stdout, stderr = command(["triage-reject", "1"])
 
         self.assertEqual((code, stdout, stderr), (2, "", "agent-flywheel: open signal 1 not found\n"))
+
+    def test_json_promotion_returns_exact_persisted_case_for_selected_signal(self):
+        self.seed()
+
+        code, stdout, stderr = self.promotion_command(signal_id=2)
+
+        self.assertEqual((code, stderr), (0, ""))
+        self.assertEqual(len(stdout.splitlines()), 1)
+        result = json.loads(stdout)
+        conn = store.connect(self.db_path)
+        try:
+            signal = conn.execute("SELECT status, case_id FROM signals WHERE id = 2").fetchone()
+            case = conn.execute("SELECT * FROM cases WHERE id = ?", (result["case_id"],)).fetchone()
+            self.assertEqual(result, {
+                "schema_version": 1,
+                "signal_id": 2,
+                "case_id": signal["case_id"],
+            })
+            self.assertEqual(signal["status"], "promoted")
+            self.assertEqual(case["status"], "candidate")
+            self.assertEqual(case["fingerprint"], "confirmed-correction")
+            self.assertEqual(case["diagnosis"], "Review the correction evidence before drafting.")
+            self.assertEqual(conn.execute("SELECT status FROM signals WHERE id = 1").fetchone()[0], "open")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0], 7)
+        finally:
+            conn.close()
+
+    def test_json_promotion_failures_return_no_case_id_and_preserve_saved_state(self):
+        self.seed()
+        before = self.database_state()
+
+        for signal_id, fingerprint in ((3, "confirmed-correction"), (1, "secret-fingerprint-1")):
+            with self.subTest(signal_id=signal_id, fingerprint=fingerprint):
+                code, stdout, stderr = self.promotion_command(signal_id, fingerprint)
+                self.assertEqual((code, stdout), (2, ""))
+                self.assertTrue(stderr)
+                self.assertEqual(self.database_state(), before)
 
     def test_triage_proposal_does_not_change_saved_signals_or_create_candidates(self):
         self.seed()
