@@ -166,6 +166,10 @@ arrive under `$AGENT_FLYWHEEL_STATE/drafts/<attempt>/` (default
 `~/.local/state/agent-flywheel/drafts/`); OMP stdout logs contain JSON events,
 while the final assistant text remains the drafter's result.
 
+Each call also writes `<label>.diagnostics.json` with its command, duration, exit
+code, and last 4000 characters of stdout and stderr. Failed-call errors point
+to that file.
+
 ## The four seams
 
 A host implements each protocol in `host.py`. These are the only places where

@@ -308,10 +308,12 @@ def run_drafter(
             writable=[worktree, tmp_dir, tmp_dir / "home"],
             profile_dir=attempt_dir,
         )
+        started = time.monotonic()
         output_factory = getattr(runner, "draft_output", None)
         output = output_factory(progress.activity if progress else None) if output_factory else None
         chunks = []
         activity_text = {"stdout": "", "stderr": ""}
+        tails = {"stdout": "", "stderr": ""}
         decoders = {
             name: codecs.getincrementaldecoder("utf-8")(errors="replace")
             for name in ("stdout", "stderr")
@@ -326,6 +328,7 @@ def run_drafter(
                 text = decoders[name].decode(data, final=final)
                 if not text:
                     return
+                tails[name] = (tails[name] + text)[-4000:]
                 if name == "stdout":
                     if output is not None:
                         output.feed(text)
@@ -358,6 +361,19 @@ def run_drafter(
                 proc.kill()
                 proc.wait()
                 raise
+        (attempt_dir / f"{label}.diagnostics.json").write_text(
+            json.dumps(
+                {
+                    "argv": argv,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000),
+                    "returncode": returncode,
+                    "stdout_tail": tails["stdout"],
+                    "stderr_tail": tails["stderr"],
+                },
+                indent=2,
+            )
+            + "\n"
+        )
         return output.finish() if output is not None else "".join(chunks), returncode
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -396,7 +412,7 @@ def _drafter_call(
         worktree=worktree, attempt_dir=attempt_dir, prompt=prompt, label=label, progress=progress,
     )
     if returncode != 0:
-        return None, f"{label} subprocess exited {returncode}"
+        return None, f"{label} subprocess exited {returncode}; diagnostics: {attempt_dir / f'{label}.diagnostics.json'}"
     result = parse_drafter_result(stdout)
     if result is None:
         return None, f"{label} call did not return a parseable JSON result"
