@@ -68,6 +68,9 @@ class DotfilesHost:
         claude_src = tree / "roles" / "claude_code" / "files" / ".claude"
         if claude_src.is_dir():
             shutil.copytree(claude_src, home / ".claude", dirs_exist_ok=True)
+        skills_src = tree / "roles" / "claude_code" / "files" / ".agents" / "skills"
+        if skills_src.is_dir():
+            shutil.copytree(skills_src, home / ".agents" / "skills", dirs_exist_ok=True, symlinks=True)
 
     def describe(self) -> str:
         return self._description

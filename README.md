@@ -187,6 +187,15 @@ verdict algebra, and publish step do not.
 leaves reads open because agent CLI lookup paths changed across releases. Eval
 cases have separate, stricter confinement.
 
+On macOS, online evals that find Apple's `/usr/bin/git` expose the selected
+developer Git through a private `$HOME/.eval-bin/git` symlink. This avoids
+launcher cache writes outside the private `TMPDIR`; sandbox permissions stay
+unchanged.
+
+`DotfilesHost` also stages canonical `roles/claude_code/files/.agents/skills`
+into `$HOME/.agents/skills`, preserving symlinks alongside the legacy agent
+configuration.
+
 The OMP runner gives each drafting call a private SQLite backup of
 `~/.omp/agent/agent.db`, including committed WAL data, so the isolated home can
 use the configured model's credentials. The copy is owner-readable/writable

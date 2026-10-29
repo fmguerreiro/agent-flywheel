@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 from dataclasses import dataclass, field
@@ -440,6 +441,15 @@ def _isolated_env(harness_bin: str, home: Path) -> dict[str, str]:
     tmpdir = home / "tmp"
     tmpdir.mkdir(parents=True, exist_ok=True)
     env["TMPDIR"] = str(tmpdir)
+    if sys.platform == "darwin" and shutil.which("git", path=env.get("PATH")) == "/usr/bin/git":
+        # Apple's launcher writes an xcrun cache outside the sandbox's private TMPDIR.
+        git = subprocess.check_output(["/usr/bin/xcrun", "--find", "git"], text=True).strip()
+        bin_dir = home / ".eval-bin"
+        bin_dir.mkdir(exist_ok=True)
+        git_link = bin_dir / "git"
+        git_link.unlink(missing_ok=True)
+        git_link.symlink_to(git)
+        env["PATH"] = os.pathsep.join((str(bin_dir), env.get("PATH", os.defpath)))
     env.update(_harness_auth_env(harness_bin, home))
     return env
 
