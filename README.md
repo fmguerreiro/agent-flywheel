@@ -283,6 +283,8 @@ Built-in OMP and Claude Code harnesses still work. `any` still tries OMP first,
 then Claude Code. Autonomous drafting still accepts structural evals only;
 online evals do not enter its patch gate.
 
+Run online cases with `agent-flywheel eval --repo /path/to/repo --base BASE --candidate CANDIDATE --online`.
+
 ## When this does not fit you
 
 **Your agent's rules must be statically checkable.** A structural case runs
@@ -297,9 +299,19 @@ drifts.
 **Your agent's configuration must be a git repository.** Publishing pushes a
 commit. If your rules live in a hosted dashboard, half the system is inert.
 
-**macOS, for now.** The shipped sandbox uses `sandbox-exec`. `NullSandbox`
-honestly confines nothing. A Linux implementation using `bwrap` would be a
-small addition; nothing above it would change.
+**Sandbox support differs by operation.** Autonomous drafting uses macOS
+`sandbox-exec`; `NullSandbox` does not confine anything. Built-in online OMP
+evaluations also support Linux with `bwrap` (bubblewrap) installed on `PATH`
+and working user and PID namespaces. Install bubblewrap using your Linux
+distribution's package manager. A missing or unusable sandbox produces an
+infrastructure skip; the evaluator never runs OMP unconfined as a fallback.
+Linux accepts a standalone ELF OMP executable or a simple `sh`/`bash` launcher
+containing only `exec /absolute/path/to/omp "$@"`; other launchers fail closed.
+Linux online evaluations make the revision and case read-only, give the
+isolated home and behavioral scratch directory write access, and hide the
+real home and host temporary directories. Network access and explicitly
+forwarded GitHub credentials remain available to online cases. This support
+does not extend the autonomous drafting sandbox or external harness adapters.
 
 ## Prior art
 

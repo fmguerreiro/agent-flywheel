@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import tomllib
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -204,6 +206,69 @@ def _online_sandbox_profile(
         f'(allow file-write*\n{writable}\n  (literal "/dev/null"))\n'
     )
 
+def _linux_omp_executable(harness_bin: str) -> Path:
+    path = Path(shutil.which(harness_bin) or harness_bin).resolve()
+    seen = set()
+    while path not in seen:
+        seen.add(path)
+        with path.open("rb") as launcher:
+            data = launcher.read(4097)
+        if data.startswith(b"\x7fELF"):
+            return path
+        try:
+            lines = data.decode("utf-8").splitlines()
+            command = shlex.split(lines[1]) if len(lines) == 2 else []
+        except (UnicodeDecodeError, ValueError):
+            lines, command = [], []
+        if (len(data) > 4096 or len(lines) != 2
+                or lines[0] not in ("#!/bin/sh", "#!/bin/bash")
+                or len(command) != 3 or command[0] != "exec"
+                or command[2] != "$@" or not Path(command[1]).is_absolute()):
+            break
+        path = Path(command[1]).resolve()
+    raise RuntimeError(f"unsupported Linux omp launcher: {path}; use a standalone ELF executable")
+
+
+def _linux_online_sandbox(
+    *, sandbox: str, tree: Path, case: Case, home: Path, cwd: Path,
+    harness_bin: str, stack: ExitStack,
+) -> tuple[list[str], str, tuple[int, ...]]:
+    tree, case_dir, home, cwd = (p.resolve() for p in (tree, case.path, home, cwd))
+    executable = _linux_omp_executable(harness_bin)
+    protected = (tree, case_dir)
+    real_home = _REAL_HOME.resolve()
+    def overlaps(a: Path, b: Path) -> bool:
+        return a == b or a.is_relative_to(b) or b.is_relative_to(a)
+
+    if any(overlaps(home, path) for path in (*protected, real_home)):
+        raise RuntimeError("online sandbox home overlaps protected data")
+    writable_cwd = not any(cwd == path or cwd.is_relative_to(path) for path in protected)
+    if writable_cwd and any(overlaps(cwd, path) for path in (*protected, real_home)):
+        raise RuntimeError("online sandbox working directory overlaps protected data")
+
+    args = [sandbox, "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/",
+            "--dev", "/dev", "--proc", "/proc"]
+    hidden = {Path(p) for p in ("/home", "/root", "/tmp", "/var/tmp",
+                                "/run/user", "/media", "/mnt") if Path(p).is_dir()}
+    # The real home can be outside the conventional Linux home directories.
+    if not any(real_home == path or real_home.is_relative_to(path) for path in hidden):
+        hidden.add(real_home)
+    for path in sorted(hidden, key=lambda p: len(p.parts)):
+        args.extend(("--tmpfs", str(path)))
+
+    mounts = [(tree, False), (case_dir, False), (home, True), (executable, False)]
+    if writable_cwd:
+        mounts.append((cwd, True))
+    fds = []
+    for path, writable in sorted(mounts, key=lambda item: (len(item[0].parts), item[1])):
+        fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+        stack.callback(os.close, fd)
+        fds.append(fd)
+        args.extend(("--bind-fd" if writable else "--ro-bind-fd", str(fd), str(path)))
+    args.extend(("--chdir", str(cwd), "--"))
+    return args, str(executable), tuple(fds)
+
+
 
 def _run_online_harness(
     *,
@@ -216,32 +281,49 @@ def _run_online_harness(
     env: dict[str, str],
 ) -> subprocess.CompletedProcess:
     args = _harness_command(harness_bin, prompt)
-    if harness_bin == "omp":
-        sandbox = shutil.which("sandbox-exec")
-        if sandbox is None:
-            raise RuntimeError("sandbox-exec is required for online omp evaluations")
-        args = [
-            sandbox,
-            "-p",
-            _online_sandbox_profile(
-                tree=tree,
-                case=case,
-                home=home,
+    with ExitStack() as stack:
+        fds = ()
+        if harness_bin == "omp":
+            if sys.platform == "linux":
+                sandbox = shutil.which("bwrap")
+                if sandbox is None:
+                    raise RuntimeError("bwrap is required for online omp evaluations on Linux")
+                try:
+                    prefix, executable, fds = _linux_online_sandbox(
+                        sandbox=sandbox, tree=tree, case=case, home=home, cwd=cwd,
+                        harness_bin=harness_bin, stack=stack,
+                    )
+                except OSError as exc:
+                    raise RuntimeError(f"cannot prepare Linux online sandbox: {exc}") from exc
+                args = [*prefix, executable, *args[1:]]
+            elif sys.platform == "darwin":
+                sandbox = shutil.which("sandbox-exec")
+                if sandbox is None:
+                    raise RuntimeError("sandbox-exec is required for online omp evaluations")
+                args = [
+                    sandbox,
+                    "-p",
+                    _online_sandbox_profile(
+                        tree=tree, case=case, home=home, cwd=cwd, harness_bin=harness_bin,
+                    ),
+                    *args,
+                ]
+            else:
+                raise RuntimeError(f"online omp sandbox is not supported on {sys.platform}")
+        try:
+            return subprocess.run(
+                args,
+                stdin=subprocess.DEVNULL,
                 cwd=cwd,
-                harness_bin=harness_bin,
-            ),
-            *args,
-        ]
-    return subprocess.run(
-        args,
-        stdin=subprocess.DEVNULL,
-        cwd=cwd,
-        check=False,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=ONLINE_TIMEOUT,
-    )
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=ONLINE_TIMEOUT,
+                pass_fds=fds,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"cannot start online harness sandbox: {exc}") from exc
 
 
 def _run_check(
